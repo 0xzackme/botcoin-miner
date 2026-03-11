@@ -16,14 +16,30 @@ let sessionId = null;
 // ─── Init ───────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', async () => {
-    connectSSE();
     loadModels();
-    await refreshStatus();
+    const status = await refreshStatus();
+    // Show setup overlay if no API key / no session
+    if (!status || !status.hasApiKey) {
+        showSetup();
+    } else {
+        hideSetup();
+        connectSSE();
+    }
     startUptimeTimer();
     setInterval(refreshStatus, 10000);
     setInterval(refreshEpoch, 60000);
     refreshEpoch();
 });
+
+function showSetup() {
+    const overlay = document.getElementById('setupOverlay');
+    if (overlay) overlay.classList.remove('hidden');
+}
+
+function hideSetup() {
+    const overlay = document.getElementById('setupOverlay');
+    if (overlay) overlay.classList.add('hidden');
+}
 
 // ─── SSE Connection ─────────────────────────────────────
 
@@ -87,8 +103,7 @@ function updateState(data) {
     // Session info
     if (data.sessionId) sessionId = data.sessionId;
     if (data.hasApiKey !== undefined) {
-        const apiSection = document.getElementById('apiKeySection');
-        if (apiSection) apiSection.style.display = data.hasApiKey ? 'none' : 'block';
+        if (data.hasApiKey) { hideSetup(); } else { showSetup(); }
     }
 
     // Multi-user stats
@@ -209,7 +224,8 @@ async function refreshStatus() {
             const sel = document.getElementById('modelSelect');
             if (sel && sel.value !== data.model) sel.value = data.model;
         }
-    } catch { }
+        return data;
+    } catch { return null; }
 }
 
 async function refreshEpoch() {
@@ -230,7 +246,7 @@ async function setApiKey() {
     const key = input?.value?.trim();
     if (!key) return;
 
-    const btn = document.getElementById('btnSetKey');
+    const btn = document.getElementById('btnSetKey') || document.getElementById('setupBtn');
     if (btn) { btn.disabled = true; btn.textContent = 'Connecting...'; }
 
     try {
@@ -242,19 +258,25 @@ async function setApiKey() {
         const data = await res.json();
         if (data.ok) {
             sessionId = data.sessionId;
-            appendLog({ timestamp: new Date().toISOString(), level: 'success', source: 'ui', message: `Connected! Wallet: ${data.walletAddress}` });
-            // Reconnect SSE for this session
+            hideSetup();
             connectSSE();
             setTimeout(refreshStatus, 1000);
+            appendLog({ timestamp: new Date().toISOString(), level: 'success', source: 'ui', message: `Connected! Wallet: ${data.walletAddress}` });
         } else {
+            const errEl = document.getElementById('setupError');
+            if (errEl) errEl.textContent = data.error || 'Connection failed';
             appendLog({ timestamp: new Date().toISOString(), level: 'error', source: 'ui', message: `API Key error: ${data.error}` });
         }
     } catch (e) {
-        appendLog({ timestamp: new Date().toISOString(), level: 'error', source: 'ui', message: `Connection failed: ${e.message}` });
+        const errEl = document.getElementById('setupError');
+        if (errEl) errEl.textContent = `Connection failed: ${e.message}`;
     } finally {
-        if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
+        if (btn) { btn.disabled = false; btn.textContent = '🚀 Connect & Start'; }
     }
 }
+
+// Alias for HTML onclick
+const submitApiKey = setApiKey;
 
 async function startMining() {
     const model = document.getElementById('modelSelect').value;
