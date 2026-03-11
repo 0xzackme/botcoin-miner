@@ -516,16 +516,27 @@ class MinerSession {
                 const buyAmount = requiredTokens - botcoinBalance + 100;
                 this.log('warn', 'miner', `Buying ${buyAmount.toLocaleString()} BOTCOIN...`);
 
-                try {
-                    const swapResult = await this.swapForBotcoin(buyAmount);
-                    if (this.shouldStop) return this._cleanup('User stopped');
-                    const swapLower = (swapResult || '').toLowerCase();
-                    if (swapLower.includes('insufficient') || swapLower.includes('failed')) {
-                        this.log('error', 'miner', `Swap failed. Fund wallet with more ETH.`);
-                        this.setState(STATES.ERROR); this.isRunning = false; return;
+                let funded = false;
+                for (let swapTry = 1; swapTry <= 3; swapTry++) {
+                    try {
+                        const swapResult = await this.swapForBotcoin(buyAmount);
+                        if (this.shouldStop) return this._cleanup('User stopped');
+                        const swapLower = (swapResult || '').toLowerCase();
+                        if (swapLower.includes('insufficient') || swapLower.includes('failed')) {
+                            throw new Error('Swap returned failure response');
+                        }
+                        funded = true;
+                        break;
+                    } catch (e) {
+                        this.log('warn', 'miner', `Swap attempt ${swapTry}/3 failed: ${e.message.slice(0, 120)}`);
+                        if (swapTry < 3) {
+                            this.log('info', 'miner', `Retrying in 10s...`);
+                            await this._sleep(10000);
+                        }
                     }
-                } catch (e) {
-                    this.log('error', 'miner', `Auto-fund failed: ${e.message}`);
+                }
+                if (!funded) {
+                    this.log('error', 'miner', `Auto-fund failed after 3 attempts. Fund wallet manually with BOTCOIN or more ETH.`);
                     this.setState(STATES.ERROR); this.isRunning = false; return;
                 }
             } else if (botcoinBalance < requiredTokens && config.autoFund === false) {
