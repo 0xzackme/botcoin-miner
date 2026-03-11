@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BOTCOIN Miner — Bankr LLM Powered</title>
+  <meta name="description"
+    content="Plug-and-play BOTCOIN mining agent powered by Bankr LLM Gateway. Non-custodial, self-funding inference.">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon"
+    href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⛏</text></svg>">
+</head>
+
+<body>
+  <!-- ─── Setup Overlay ────────────────────────────── -->
+  <div id="setupOverlay" class="setup-overlay hidden">
+    <div class="setup-card">
+      <div class="logo">⛏</div>
+      <h2>Welcome to BOTCOIN Miner</h2>
+      <p>Enter your Bankr API Key to begin mining.</p>
+      <input type="password" id="apiKeyInput" placeholder="bk_..." spellcheck="false" autocomplete="off">
+      <button id="setupBtn" class="btn btn-primary"
+        onclick="submitApiKey()" style="width:100%; justify-content:center; padding:16px;">🚀 Connect &
+        Start</button>
+      <div id="setupError" class="setup-error"></div>
+      <div class="setup-links">
+        <a href="https://bankr.bot/api" target="_blank" rel="noopener">Get API Key →</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="app">
+
+    <!-- ─── Header ───────────────────────────────────── -->
+    <header class="header">
+      <div class="header-left">
+        <span class="logo">⛏</span>
+        <h1><span>BOTCOIN</span> Miner</h1>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;">
+        <span id="statusBadge" class="status-badge idle">IDLE</span>
+        <div id="connectionDot" class="connection-dot" title="SSE connection"></div>
+      </div>
+    </header>
+
+    <!-- ─── Wallet Card ──────────────────────────────── -->
+    <div id="walletCard" class="card">
+      <div class="card-header">
+        <span class="card-title">Mining Wallet</span>
+      </div>
+      <div class="wallet-wrap" style="display:flex; gap:12px;">
+        <div id="walletAddress" class="wallet-info">
+          Waiting for miner to start...
+        </div>
+        <button class="btn btn-secondary btn-copy" onclick="copyWallet()"
+          style="flex-shrink:0; padding:12px 20px;">Copy</button>
+      </div>
+    </div>
+
+    <!-- ─── Stats Grid ───────────────────────────────── -->
+    <div class="stats-grid">
+      <div class="stat">
+        <div id="statPassed" class="stat-value green">0</div>
+        <div class="stat-label">Solves Passed</div>
+      </div>
+      <div class="stat">
+        <div id="statCredits" class="stat-value cyan">0</div>
+        <div class="stat-label">Credits Earned</div>
+      </div>
+      <div class="stat">
+        <div id="statReceipts" class="stat-value purple">0</div>
+        <div class="stat-label">Receipts Posted</div>
+      </div>
+      <div class="stat">
+        <div id="statRate" class="stat-value green">—</div>
+        <div class="stat-label">Success Rate</div>
+      </div>
+      <div class="stat">
+        <div id="statAttempted" class="stat-value yellow">0</div>
+        <div class="stat-label">Challenges</div>
+      </div>
+      <div class="stat">
+        <div id="statFailed" class="stat-value red">0</div>
+        <div class="stat-label">Failed</div>
+      </div>
+      <div class="stat">
+        <div id="statEpoch" class="stat-value" style="color:var(--text)">—</div>
+        <div class="stat-label">Current Epoch</div>
+      </div>
+      <div class="stat">
+        <div id="statUptime" class="stat-value cyan">—</div>
+        <div class="stat-label">Uptime</div>
+      </div>
+    </div>
+
+    <!-- ─── Pipeline Progress ────────────────────────── -->
+    <div id="pipelineCard" class="card pipeline-card hidden">
+      <div class="card-header">
+        <span class="card-title">Solve Pipeline</span>
+        <span id="pipelineDetail" class="pipeline-detail"></span>
+      </div>
+      <div class="pipeline-bar">
+        <div class="pipeline-stages">
+          <div id="stage1" class="pipeline-stage" data-label="Extract">1</div>
+          <div class="pipeline-connector"></div>
+          <div id="stage2" class="pipeline-stage" data-label="Verify">2</div>
+          <div class="pipeline-connector"></div>
+          <div id="stage3" class="pipeline-stage" data-label="Parse">3</div>
+          <div class="pipeline-connector"></div>
+          <div id="stage4" class="pipeline-stage" data-label="Build">4</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Controls ─────────────────────────────────── -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Controls</span>
+      </div>
+      <div class="controls">
+        <button id="btnStart" class="btn btn-primary" onclick="startMining()">⛏ Start Mining</button>
+        <button id="btnStop" class="btn btn-danger" onclick="stopMining()" disabled>⏹ Stop</button>
+        <button id="btnClaim" class="btn btn-secondary" onclick="claimRewards()">💰 Claim</button>
+        <button id="btnTest" class="btn btn-outline" onclick="testSolve()">🧪 Test Solve</button>
+      </div>
+      <div class="controls-row">
+        <div class="select-wrap">
+          <label class="select-label">Primary Model</label>
+          <select id="modelSelect" onchange="updateModel(this.value)">
+            <option value="">Loading...</option>
+          </select>
+        </div>
+        <div class="select-wrap" style="min-width:200px;">
+          <label class="select-label">Stake Tier</label>
+          <select id="stakeTier">
+            <option value="25000000000000000000000000">Tier 1 — 25M (1 credit)</option>
+            <option value="50000000000000000000000000">Tier 2 — 50M (2 credits)</option>
+            <option value="100000000000000000000000000">Tier 3 — 100M (3 credits)</option>
+          </select>
+        </div>
+      </div>
+      <div id="verifyModelRow" class="controls-row" style="display:none;">
+        <div class="select-wrap" style="flex:1;">
+          <label class="select-label">Verification Model</label>
+          <select id="verifyModelSelect" onchange="updateVerifyModel(this.value)">
+            <option value="">Loading...</option>
+          </select>
+        </div>
+      </div>
+      <div class="controls-toggles">
+        <label class="toggle">
+          <input type="checkbox" id="autoFundToggle" checked>
+          <span class="toggle-slider"></span>
+          <span class="toggle-label-text">Auto-fund BOTCOIN</span>
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="autoCreditsToggle" checked>
+          <span class="toggle-slider"></span>
+          <span class="toggle-label-text">Auto top-up LLM credits</span>
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="verifyToggle" onchange="toggleVerifyModel(this.checked)">
+          <span class="toggle-slider"></span>
+          <span class="toggle-label-text">Dual-model verification</span>
+        </label>
+      </div>
+    </div>
+
+    <!-- ─── Epoch Info ───────────────────────────────── -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Epoch Info</span>
+        <span id="creditBalance" class="credit-badge" title="LLM Credit Balance">—</span>
+      </div>
+      <div id="epochInfo" style="font-size:14px;color:var(--text2);">
+        Click "Start Mining" to see epoch data.
+      </div>
+    </div>
+
+    <!-- ─── Log Viewer ───────────────────────────────── -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Agent Output</span>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-sm" onclick="toggleAutoScroll()" id="btnAutoScroll"
+            title="Toggle auto-scroll">📌</button>
+          <button class="btn btn-sm" onclick="clearLogs()">Clear</button>
+        </div>
+      </div>
+      <div id="logContainer" class="log-container"></div>
+    </div>
+
+    <!-- ─── Footer ───────────────────────────────────── -->
+    <footer class="footer">
+      <span>BOTCOIN Miner — Non-custodial • Open Source</span>
+      <a href="https://bankr.bot/api" target="_blank" rel="noopener">Bankr API</a>
+    </footer>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+
+</html>
