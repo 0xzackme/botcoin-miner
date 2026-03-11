@@ -475,10 +475,23 @@ class MinerSession {
             this.broadcast({ type: 'state', ...this.getStatus() });
             if (this.shouldStop) return this._cleanup('User stopped');
 
-            // Phase 2: Balances
-            const balanceText = await this.getBalances();
+            // Phase 2: Balances (retry up to 3 times — Bankr can have transient errors)
+            let balanceText = '';
+            for (let balTry = 1; balTry <= 3; balTry++) {
+                try {
+                    balanceText = await this.getBalances();
+                    break;
+                } catch (e) {
+                    this.log('warn', 'miner', `Balance check failed (attempt ${balTry}/3): ${e.message.slice(0, 150)}`);
+                    if (balTry < 3) {
+                        await this._sleep(5000);
+                    } else {
+                        this.log('warn', 'miner', 'Balance check failed 3 times. Proceeding with 0 balance assumption...');
+                    }
+                }
+            }
             if (this.shouldStop) return this._cleanup('User stopped');
-            this.log('info', 'miner', `Balances: ${balanceText.slice(0, 300)}`);
+            if (balanceText) this.log('info', 'miner', `Balances: ${balanceText.slice(0, 300)}`);
 
             const botcoinMatch = balanceText.match(/botcoin[:\s]*([0-9,.]+)/i) || balanceText.match(/([0-9,.]+)\s*botcoin/i);
             const botcoinBalance = botcoinMatch ? parseFloat(botcoinMatch[1].replace(/,/g, '')) : 0;
