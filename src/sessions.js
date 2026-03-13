@@ -468,191 +468,159 @@ class MinerSession {
         this.broadcast({ type: 'state', ...this.getStatus() });
 
         try {
-            // Phase 1: Wallet
+            const stakeAmountWei = config.stakeAmount || '25000000000000000000000000';
+            const requiredTokens = getTierTokens(stakeAmountWei);
+            const tierInfo = TIER_MAP[stakeAmountWei];
+
+            // ── Step 1: Resolve Wallet (fast) ───────────────
             this.setState(STATES.CHECKING_WALLET);
             this.walletAddress = await this.getWalletAddress();
             this.log('success', 'miner', `Mining wallet: ${this.walletAddress}`);
             this.broadcast({ type: 'state', ...this.getStatus() });
             if (this.shouldStop) return this._cleanup('User stopped');
 
-            // Phase 2: Balances (retry up to 3 times — Bankr can have transient errors)
-            let balanceText = '';
-            for (let balTry = 1; balTry <= 3; balTry++) {
-                try {
-                    balanceText = await this.getBalances();
-                    break;
-                } catch (e) {
-                    this.log('warn', 'miner', `Balance check failed (attempt ${balTry}/3): ${e.message.slice(0, 150)}`);
-                    if (balTry < 3) {
-                        await this._sleep(5000);
-                    } else {
-                        this.log('warn', 'miner', 'Balance check failed 3 times. Proceeding with 0 balance assumption...');
-                    }
-                }
-            }
-            if (this.shouldStop) return this._cleanup('User stopped');
-            if (balanceText) this.log('info', 'miner', `Balances: ${balanceText.slice(0, 300)}`);
-
-            const botcoinMatch = balanceText.match(/botcoin[:\s]*([0-9,.]+)/i) || balanceText.match(/([0-9,.]+)\s*botcoin/i);
-            const botcoinBalance = botcoinMatch ? parseFloat(botcoinMatch[1].replace(/,/g, '')) : 0;
-            this.log('info', 'miner', `Estimated BOTCOIN: ${botcoinBalance.toLocaleString()}`);
-
-            const ethUsdMatch = balanceText.match(/ETH.*?\$([0-9,.]+)/i);
-            const ethUsd = ethUsdMatch ? parseFloat(ethUsdMatch[1].replace(/,/g, '')) : 0;
-
-            // Phase 3: Auto-fund
-            const stakeAmountWei = config.stakeAmount || '25000000000000000000000000';
-            const requiredTokens = getTierTokens(stakeAmountWei);
-            const tierInfo = TIER_MAP[stakeAmountWei];
-            this.log('info', 'miner', `Selected stake: ${tierInfo ? tierInfo.label : requiredTokens.toLocaleString() + ' BOTCOIN'}`);
-
-            if (botcoinBalance < requiredTokens && config.autoFund !== false) {
-                // Check BOTCOIN price to calculate required ETH
-                let requiredUsd = null;
-                try {
-                    const dexRes = await fetch('https://api.dexscreener.com/latest/dex/tokens/0xA601877977340862Ca67f816eb079958E5bd0BA3');
-                    const dexData = await dexRes.json();
-                    const pair = dexData.pairs?.[0];
-                    if (pair?.priceUsd) {
-                        const pricePerToken = parseFloat(pair.priceUsd);
-                        const tokensNeeded = requiredTokens - botcoinBalance;
-                        requiredUsd = tokensNeeded * pricePerToken;
-                        this.log('info', 'miner', `BOTCOIN price: $${pricePerToken.toFixed(8)} | Need ${tokensNeeded.toLocaleString()} tokens ≈ $${requiredUsd.toFixed(2)}`);
-                    }
-                } catch { }
-
-                // Check if wallet has enough ETH
-                const gasReserve = 1; // Reserve $1 for gas fees
-                if (requiredUsd !== null && ethUsd < requiredUsd + gasReserve) {
-                    this.log('error', 'miner', `⚠ Insufficient ETH to buy ${requiredTokens.toLocaleString()} BOTCOIN`);
-                    this.log('error', 'miner', `Need: ~$${(requiredUsd + gasReserve).toFixed(2)} | Have: $${ethUsd.toFixed(2)}`);
-                    this.log('error', 'miner', `Fund wallet with at least $${(requiredUsd + gasReserve - ethUsd).toFixed(2)} more ETH on Base`);
-                    this.log('error', 'miner', `Wallet: ${this.walletAddress}`);
-                    this.setState(STATES.ERROR); this.isRunning = false; return;
-                } else if (ethUsd < 2) {
-                    this.log('error', 'miner', `⚠ Not enough ETH ($${ethUsd.toFixed(2)}). Fund wallet: ${this.walletAddress}`);
-                    this.setState(STATES.ERROR); this.isRunning = false; return;
-                }
-
-                // Calculate swap amount in USD (leave $1 for gas)
-                const swapUsd = requiredUsd !== null
-                    ? Math.ceil(requiredUsd * 1.1)  // 10% buffer for slippage
-                    : Math.max(2, Math.floor(ethUsd - 1));
-
-                this.setState(STATES.FUNDING);
-                this.log('warn', 'miner', `Swapping ~$${swapUsd} of ETH for BOTCOIN...`);
-
-                let funded = false;
-                for (let swapTry = 1; swapTry <= 3; swapTry++) {
-                    try {
-                        const swapResult = await this.swapForBotcoin(swapUsd);
-                        if (this.shouldStop) return this._cleanup('User stopped');
-                        const swapLower = (swapResult || '').toLowerCase();
-                        if (swapLower.includes('insufficient') || swapLower.includes('failed')) {
-                            throw new Error('Swap returned failure response');
-                        }
-                        funded = true;
-                        this.log('success', 'miner', `Swap completed ✔`);
-                        break;
-                    } catch (e) {
-                        this.log('warn', 'miner', `Swap attempt ${swapTry}/3 failed: ${e.message.slice(0, 120)}`);
-                        if (swapTry < 3) {
-                            this.log('info', 'miner', `Retrying in 10s...`);
-                            await this._sleep(10000);
-                        }
-                    }
-                }
-                if (!funded) {
-                    this.log('error', 'miner', `Auto-fund failed after 3 attempts. Fund wallet manually with BOTCOIN or more ETH.`);
-                    this.setState(STATES.ERROR); this.isRunning = false; return;
-                }
-
-                // Verify BOTCOIN was actually received
-                this.log('info', 'miner', 'Verifying BOTCOIN balance after swap...');
-                try {
-                    const postSwapText = await this.getBalances();
-                    const postMatch = postSwapText.match(/botcoin[:\s]*([0-9,.]+)/i) || postSwapText.match(/([0-9,.]+)\s*botcoin/i);
-                    const postBalance = postMatch ? parseFloat(postMatch[1].replace(/,/g, '')) : 0;
-                    this.log('info', 'miner', `Post-swap BOTCOIN: ${postBalance.toLocaleString()}`);
-                    if (postBalance < requiredTokens) {
-                        this.log('error', 'miner', `⚠ Swap completed but BOTCOIN balance (${postBalance.toLocaleString()}) still below required (${requiredTokens.toLocaleString()}).`);
-                        this.log('error', 'miner', `Wallet may not have enough ETH. Fund wallet: ${this.walletAddress}`);
-                        this.setState(STATES.ERROR); this.isRunning = false; return;
-                    }
-                } catch (verifyErr) {
-                    this.log('warn', 'miner', `Post-swap balance check failed: ${verifyErr.message.slice(0, 80)}. Proceeding anyway...`);
-                }
-            } else if (botcoinBalance < requiredTokens && config.autoFund === false) {
-                // Auto-fund disabled but insufficient BOTCOIN — can't proceed
-                this.log('error', 'miner', `⚠ Insufficient BOTCOIN: have ${botcoinBalance.toLocaleString()}, need ${requiredTokens.toLocaleString()} for ${tierInfo ? tierInfo.label : 'staking'}`);
-                this.log('error', 'miner', `Enable "Auto-fund BOTCOIN" or manually buy BOTCOIN and stake at least ${requiredTokens.toLocaleString()} before mining.`);
-                this.log('error', 'miner', `Wallet: ${this.walletAddress}`);
-                this.setState(STATES.ERROR); this.isRunning = false; return;
-            } else if (botcoinBalance >= requiredTokens) {
-                this.log('success', 'miner', `BOTCOIN sufficient (${botcoinBalance.toLocaleString()}) ✔`);
-            }
-
-            if (this.shouldStop) return this._cleanup('User stopped');
-
-            // Phase 4: Staking
-            this.setState(STATES.STAKING);
-            this.log('info', 'miner', `Staking ${requiredTokens.toLocaleString()} BOTCOIN...`);
-            
-            const doStake = async () => {
-                const approveResp = await coordinator.getStakeApproveCalldata(stakeAmountWei);
-                if (approveResp.transaction) await this.submitTransaction(approveResp.transaction, 'Approve BOTCOIN');
-                if (this.shouldStop) return;
-                const stakeResp = await coordinator.getStakeCalldata(stakeAmountWei);
-                if (stakeResp.transaction) await this.submitTransaction(stakeResp.transaction, 'Stake BOTCOIN');
-                this.log('success', 'miner', 'Staking confirmed ✔');
-            };
-
-            try {
-                await doStake();
-            } catch (e) {
-                const msg = e.message || '';
-                if (msg.includes('already') || msg.includes('Already') || e.status === 400) {
-                    // Existing stake — might be old/insufficient. Try unstake → restake
-                    this.log('warn', 'miner', 'Existing stake found. Unstaking and restaking with correct tier...');
-                    try {
-                        const unstakeResp = await coordinator.getUnstakeCalldata();
-                        if (unstakeResp.transaction) await this.submitTransaction(unstakeResp.transaction, 'Unstake BOTCOIN');
-                        await this._sleep(3000);
-                        await doStake();
-                    } catch (e2) {
-                        this.log('warn', 'miner', `Restake failed: ${e2.message.slice(0, 120)}. Will try auth anyway...`);
-                    }
-                } else {
-                    this.log('warn', 'miner', `Staking error: ${msg.slice(0, 120)} — will try auth anyway...`);
-                }
-            }
-
-            if (this.shouldStop) return this._cleanup('User stopped');
-
-            // Phase 5: Auth (with recovery for Insufficient stake)
+            // ── Step 2: Try Auth (fast path) ────────────────
+            // If user is already staked, this succeeds instantly → skip to mining
+            this.setState(STATES.AUTHENTICATING);
+            let authOk = false;
             try {
                 await this.ensureAuth();
+                authOk = true;
+                this.log('success', 'miner', '✔ Already staked & authenticated — fast path!');
             } catch (authErr) {
                 const authMsg = authErr.message || '';
                 if (authMsg.includes('Insufficient stake') || authMsg.includes('403')) {
-                    this.log('warn', 'miner', 'Auth says insufficient stake. Attempting unstake → restake...');
+                    this.log('info', 'miner', 'Not staked yet — setting up...');
+                } else {
+                    throw authErr; // Non-stake auth error is fatal
+                }
+            }
+
+            // ── Step 3: Stake + Fund (only if auth failed) ──
+            if (!authOk) {
+                if (this.shouldStop) return this._cleanup('User stopped');
+
+                // 3a: Try staking directly (maybe user already has BOTCOIN)
+                this.setState(STATES.STAKING);
+                this.log('info', 'miner', `Staking ${requiredTokens.toLocaleString()} BOTCOIN (${tierInfo?.label || 'selected tier'})...`);
+
+                let stakeOk = false;
+                try {
+                    const approveResp = await coordinator.getStakeApproveCalldata(stakeAmountWei);
+                    if (approveResp.transaction) await this.submitTransaction(approveResp.transaction, 'Approve BOTCOIN');
+                    const stakeResp = await coordinator.getStakeCalldata(stakeAmountWei);
+                    if (stakeResp.transaction) await this.submitTransaction(stakeResp.transaction, 'Stake BOTCOIN');
+                    stakeOk = true;
+                    this.log('success', 'miner', 'Staking confirmed ✔');
+                } catch (stakeErr) {
+                    const msg = stakeErr.message || '';
+                    if (msg.includes('already') || msg.includes('Already') || stakeErr.status === 400) {
+                        // Already staked — unstake and restake with correct tier
+                        this.log('warn', 'miner', 'Old stake found. Unstaking → restaking with correct tier...');
+                        try {
+                            const unstakeResp = await coordinator.getUnstakeCalldata();
+                            if (unstakeResp.transaction) await this.submitTransaction(unstakeResp.transaction, 'Unstake BOTCOIN');
+                            await this._sleep(3000);
+                            const approveResp2 = await coordinator.getStakeApproveCalldata(stakeAmountWei);
+                            if (approveResp2.transaction) await this.submitTransaction(approveResp2.transaction, 'Approve BOTCOIN');
+                            const stakeResp2 = await coordinator.getStakeCalldata(stakeAmountWei);
+                            if (stakeResp2.transaction) await this.submitTransaction(stakeResp2.transaction, 'Stake BOTCOIN');
+                            stakeOk = true;
+                            this.log('success', 'miner', 'Restaking confirmed ✔');
+                        } catch (restakeErr) {
+                            this.log('warn', 'miner', `Restake failed: ${restakeErr.message.slice(0, 100)}`);
+                        }
+                    } else {
+                        this.log('warn', 'miner', `Staking failed: ${msg.slice(0, 100)} — may need BOTCOIN`);
+                    }
+                }
+
+                // 3b: If staking failed, we need to buy BOTCOIN first
+                if (!stakeOk && config.autoFund !== false) {
+                    this.setState(STATES.FUNDING);
+                    this.log('info', 'miner', 'Need BOTCOIN — checking price and balance...');
+
+                    // Get BOTCOIN price from DexScreener
+                    let requiredUsd = null;
                     try {
-                        this.setState(STATES.STAKING);
-                        const unstakeResp = await coordinator.getUnstakeCalldata();
-                        if (unstakeResp.transaction) await this.submitTransaction(unstakeResp.transaction, 'Unstake BOTCOIN');
-                        await this._sleep(3000);
-                        await doStake();
-                        await this._sleep(2000);
-                        this.setState(STATES.AUTHENTICATING);
-                        await this.ensureAuth();
-                    } catch (e3) {
-                        this.log('error', 'miner', `Recovery failed: ${e3.message.slice(0, 150)}`);
-                        this.log('error', 'miner', `Make sure wallet ${this.walletAddress} has enough BOTCOIN for ${tierInfo?.label || 'staking'}.`);
+                        const dexRes = await fetch('https://api.dexscreener.com/latest/dex/tokens/0xA601877977340862Ca67f816eb079958E5bd0BA3');
+                        const dexData = await dexRes.json();
+                        const pair = dexData.pairs?.[0];
+                        if (pair?.priceUsd) {
+                            const pricePerToken = parseFloat(pair.priceUsd);
+                            requiredUsd = requiredTokens * pricePerToken;
+                            this.log('info', 'miner', `BOTCOIN price: $${pricePerToken.toFixed(8)} | ${requiredTokens.toLocaleString()} tokens ≈ $${requiredUsd.toFixed(2)}`);
+                        }
+                    } catch { }
+
+                    // Check ETH balance
+                    let ethUsd = 0;
+                    try {
+                        const balanceText = await this.getBalances();
+                        if (balanceText) this.log('info', 'miner', `Balances: ${balanceText.slice(0, 300)}`);
+                        const ethMatch = balanceText.match(/ETH.*?\$([0-9,.]+)/i);
+                        ethUsd = ethMatch ? parseFloat(ethMatch[1].replace(/,/g, '')) : 0;
+                    } catch (e) {
+                        this.log('warn', 'miner', `Balance check failed: ${e.message.slice(0, 80)}`);
+                    }
+
+                    // Can we afford it?
+                    const gasReserve = 1;
+                    if (requiredUsd !== null && ethUsd < requiredUsd + gasReserve) {
+                        this.log('error', 'miner', `⚠ Insufficient ETH to buy ${requiredTokens.toLocaleString()} BOTCOIN`);
+                        this.log('error', 'miner', `Need: ~$${(requiredUsd + gasReserve).toFixed(2)} | Have: $${ethUsd.toFixed(2)}`);
+                        this.log('error', 'miner', `Fund wallet: ${this.walletAddress}`);
+                        this.setState(STATES.ERROR); this.isRunning = false; return;
+                    } else if (ethUsd < 2) {
+                        this.log('error', 'miner', `⚠ Not enough ETH ($${ethUsd.toFixed(2)}). Fund wallet: ${this.walletAddress}`);
                         this.setState(STATES.ERROR); this.isRunning = false; return;
                     }
-                } else {
-                    throw authErr;
+
+                    // Swap ETH for BOTCOIN
+                    const swapUsd = requiredUsd !== null ? Math.ceil(requiredUsd * 1.1) : Math.max(2, Math.floor(ethUsd - 1));
+                    let funded = false;
+                    for (let swapTry = 1; swapTry <= 3; swapTry++) {
+                        try {
+                            const swapResult = await this.swapForBotcoin(swapUsd);
+                            if (this.shouldStop) return this._cleanup('User stopped');
+                            const swapLower = (swapResult || '').toLowerCase();
+                            if (swapLower.includes('insufficient') || swapLower.includes('failed')) throw new Error('Swap failed');
+                            funded = true;
+                            this.log('success', 'miner', 'Swap completed ✔');
+                            break;
+                        } catch (e) {
+                            this.log('warn', 'miner', `Swap attempt ${swapTry}/3: ${e.message.slice(0, 100)}`);
+                            if (swapTry < 3) await this._sleep(10000);
+                        }
+                    }
+                    if (!funded) {
+                        this.log('error', 'miner', 'Auto-fund failed. Fund wallet manually.');
+                        this.setState(STATES.ERROR); this.isRunning = false; return;
+                    }
+
+                    // Now stake the newly purchased BOTCOIN
+                    this.setState(STATES.STAKING);
+                    this.log('info', 'miner', 'Staking newly purchased BOTCOIN...');
+                    try {
+                        const approveResp = await coordinator.getStakeApproveCalldata(stakeAmountWei);
+                        if (approveResp.transaction) await this.submitTransaction(approveResp.transaction, 'Approve BOTCOIN');
+                        const stakeResp = await coordinator.getStakeCalldata(stakeAmountWei);
+                        if (stakeResp.transaction) await this.submitTransaction(stakeResp.transaction, 'Stake BOTCOIN');
+                        this.log('success', 'miner', 'Staking confirmed ✔');
+                    } catch (e) {
+                        this.log('error', 'miner', `Staking failed after purchase: ${e.message.slice(0, 120)}`);
+                        this.setState(STATES.ERROR); this.isRunning = false; return;
+                    }
+                } else if (!stakeOk && config.autoFund === false) {
+                    this.log('error', 'miner', `⚠ Need ${requiredTokens.toLocaleString()} BOTCOIN staked. Enable auto-fund or buy BOTCOIN manually.`);
+                    this.log('error', 'miner', `Wallet: ${this.walletAddress}`);
+                    this.setState(STATES.ERROR); this.isRunning = false; return;
                 }
+
+                // Auth after staking
+                if (this.shouldStop) return this._cleanup('User stopped');
+                this.setState(STATES.AUTHENTICATING);
+                await this.ensureAuth();
             }
 
             // Phase 6: Background services
