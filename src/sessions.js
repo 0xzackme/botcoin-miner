@@ -209,15 +209,12 @@ class MinerSession {
         return result.response || '';
     }
 
-    async swapForBotcoin(amount, ethUsdAvailable) {
+    async swapForBotcoin(swapUsd) {
         const token = '0xA601877977340862Ca67f816eb079958E5bd0BA3';
-        // Use dollar amount per botcoinskill.md spec: "swap $X of ETH to TOKEN on base"
-        // Reserve ~$1 for gas, swap the rest
-        const swapUsd = Math.max(1, Math.min(ethUsdAvailable ? ethUsdAvailable - 1 : 3, 10));
-        this.log('info', 'bankr', `Swapping $${swapUsd.toFixed(0)} of ETH for BOTCOIN...`);
+        this.log('info', 'bankr', `Swapping $${swapUsd} of ETH for BOTCOIN...`);
         const { jobId } = await this._fetchBankr('/agent/prompt', {
             method: 'POST',
-            body: JSON.stringify({ prompt: `swap $${swapUsd.toFixed(0)} of ETH to ${token} on base` })
+            body: JSON.stringify({ prompt: `swap $${swapUsd} of ETH to ${token} on base` })
         });
         const result = await this._pollJob(jobId, 180000);
         return result.response;
@@ -510,19 +507,45 @@ class MinerSession {
             this.log('info', 'miner', `Selected stake: ${tierInfo ? tierInfo.label : requiredTokens.toLocaleString() + ' BOTCOIN'}`);
 
             if (botcoinBalance < requiredTokens && config.autoFund !== false) {
-                if (ethUsd > 0 && ethUsd < 2) {
+                // Check BOTCOIN price to calculate required ETH
+                let requiredUsd = null;
+                try {
+                    const dexRes = await fetch('https://api.dexscreener.com/latest/dex/tokens/0xA601877977340862Ca67f816eb079958E5bd0BA3');
+                    const dexData = await dexRes.json();
+                    const pair = dexData.pairs?.[0];
+                    if (pair?.priceUsd) {
+                        const pricePerToken = parseFloat(pair.priceUsd);
+                        const tokensNeeded = requiredTokens - botcoinBalance;
+                        requiredUsd = tokensNeeded * pricePerToken;
+                        this.log('info', 'miner', `BOTCOIN price: $${pricePerToken.toFixed(8)} | Need ${tokensNeeded.toLocaleString()} tokens ≈ $${requiredUsd.toFixed(2)}`);
+                    }
+                } catch { }
+
+                // Check if wallet has enough ETH
+                const gasReserve = 1; // Reserve $1 for gas fees
+                if (requiredUsd !== null && ethUsd < requiredUsd + gasReserve) {
+                    this.log('error', 'miner', `⚠ Insufficient ETH to buy ${requiredTokens.toLocaleString()} BOTCOIN`);
+                    this.log('error', 'miner', `Need: ~$${(requiredUsd + gasReserve).toFixed(2)} | Have: $${ethUsd.toFixed(2)}`);
+                    this.log('error', 'miner', `Fund wallet with at least $${(requiredUsd + gasReserve - ethUsd).toFixed(2)} more ETH on Base`);
+                    this.log('error', 'miner', `Wallet: ${this.walletAddress}`);
+                    this.setState(STATES.ERROR); this.isRunning = false; return;
+                } else if (ethUsd < 2) {
                     this.log('error', 'miner', `⚠ Not enough ETH ($${ethUsd.toFixed(2)}). Fund wallet: ${this.walletAddress}`);
                     this.setState(STATES.ERROR); this.isRunning = false; return;
                 }
 
+                // Calculate swap amount in USD (leave $1 for gas)
+                const swapUsd = requiredUsd !== null
+                    ? Math.ceil(requiredUsd * 1.1)  // 10% buffer for slippage
+                    : Math.max(2, Math.floor(ethUsd - 1));
+
                 this.setState(STATES.FUNDING);
-                const buyAmount = requiredTokens - botcoinBalance + 100;
-                this.log('warn', 'miner', `Buying ${buyAmount.toLocaleString()} BOTCOIN...`);
+                this.log('warn', 'miner', `Swapping ~$${swapUsd} of ETH for BOTCOIN...`);
 
                 let funded = false;
                 for (let swapTry = 1; swapTry <= 3; swapTry++) {
                     try {
-                        const swapResult = await this.swapForBotcoin(buyAmount, ethUsd);
+                        const swapResult = await this.swapForBotcoin(swapUsd);
                         if (this.shouldStop) return this._cleanup('User stopped');
                         const swapLower = (swapResult || '').toLowerCase();
                         if (swapLower.includes('insufficient') || swapLower.includes('failed')) {
