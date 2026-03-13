@@ -526,6 +526,7 @@ class MinerSession {
                             throw new Error('Swap returned failure response');
                         }
                         funded = true;
+                        this.log('success', 'miner', `Swap completed ✔`);
                         break;
                     } catch (e) {
                         this.log('warn', 'miner', `Swap attempt ${swapTry}/3 failed: ${e.message.slice(0, 120)}`);
@@ -538,6 +539,22 @@ class MinerSession {
                 if (!funded) {
                     this.log('error', 'miner', `Auto-fund failed after 3 attempts. Fund wallet manually with BOTCOIN or more ETH.`);
                     this.setState(STATES.ERROR); this.isRunning = false; return;
+                }
+
+                // Verify BOTCOIN was actually received
+                this.log('info', 'miner', 'Verifying BOTCOIN balance after swap...');
+                try {
+                    const postSwapText = await this.getBalances();
+                    const postMatch = postSwapText.match(/botcoin[:\s]*([0-9,.]+)/i) || postSwapText.match(/([0-9,.]+)\s*botcoin/i);
+                    const postBalance = postMatch ? parseFloat(postMatch[1].replace(/,/g, '')) : 0;
+                    this.log('info', 'miner', `Post-swap BOTCOIN: ${postBalance.toLocaleString()}`);
+                    if (postBalance < requiredTokens) {
+                        this.log('error', 'miner', `⚠ Swap completed but BOTCOIN balance (${postBalance.toLocaleString()}) still below required (${requiredTokens.toLocaleString()}).`);
+                        this.log('error', 'miner', `Wallet may not have enough ETH. Fund wallet: ${this.walletAddress}`);
+                        this.setState(STATES.ERROR); this.isRunning = false; return;
+                    }
+                } catch (verifyErr) {
+                    this.log('warn', 'miner', `Post-swap balance check failed: ${verifyErr.message.slice(0, 80)}. Proceeding anyway...`);
                 }
             } else if (botcoinBalance < requiredTokens && config.autoFund === false) {
                 // Auto-fund disabled but insufficient BOTCOIN — can't proceed
