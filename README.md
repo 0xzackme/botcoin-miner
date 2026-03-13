@@ -1,12 +1,12 @@
 # ⛏ BOTCOIN Miner
 
-Plug-and-play BOTCOIN mining agent powered by **Bankr LLM Gateway**. Non-custodial, self-funding inference, web dashboard with real-time pipeline visibility. **Supports both local (self-hosted) and multi-user service mode.**
+Plug-and-play BOTCOIN mining agent powered by **Bankr LLM Gateway**. Non-custodial, self-funding inference, web dashboard with real-time pipeline visibility. **Supports both local and multi-user service mode.**
 
 ## Quick Start
 
 ```bash
 # 1. Install
-git clone <repo-url> && cd botcoin-miner
+git clone https://github.com/0xzackme/botcoin-miner.git && cd botcoin-miner
 npm install
 
 # 2. Configure (optional — for local mode)
@@ -18,7 +18,7 @@ npm start
 # Dashboard: http://localhost:3000
 ```
 
-**No API key in `.env`?** No problem — enter it via the dashboard UI. Each user gets an isolated mining session.
+**No API key in `.env`?** Enter it via the dashboard UI. Each user gets an isolated mining session.
 
 ## Modes
 
@@ -28,65 +28,71 @@ npm start
 | **Service** | Don't set `.env` key, users enter via UI | Hosted for multiple miners |
 | **Both** | Set `.env` key + others connect via UI | Your miner + service for others |
 
+## Startup Flow (Auth-First)
+
+The miner uses a fast auth-first approach — if you're already staked, it skips straight to mining in ~3 seconds:
+
+```
+Step 1: Resolve wallet (fast)
+Step 2: Try auth → Already staked? → Mine immediately! ⚡
+         ↓ (not staked)
+Step 3: Try staking directly → Success? → Auth → Mine
+         ↓ (no BOTCOIN)
+Step 4: Check price (DexScreener) → Check ETH balance → Swap → Stake → Auth → Mine
+```
+
+- **Already staked**: Wallet → Auth → Mine (~3s)
+- **Have BOTCOIN, not staked**: Wallet → Auth fail → Stake → Auth → Mine (~10s)
+- **Fresh wallet**: Wallet → Auth fail → Stake fail → Price check → Swap → Stake → Auth → Mine
+
+Balance checks and swaps only happen when actually needed.
+
 ## Multi-User Service Mode
 
 When hosted publicly, **each user** who enters their Bankr API key gets:
 - Own session (cookie-based, 24h TTL)
-- Own wallet resolution
-- Own isolated mining loop
+- Own wallet resolution & mining loop
 - Own stats, credits, epoch tracking
-- Own SSE log stream (only sees their logs)
+- Own SSE log stream
 - Auto-cleanup when idle for 24h
 
-```
-User A → enters API key → session abc → mines with wallet 0xAAA...
-User B → enters API key → session def → mines with wallet 0xBBB...
-```
-
-Complete isolation — users cannot see or interfere with each other.
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────┐
-│  Express Server (server.js)                     │
-│                                                 │
-│  ┌──────────────┐    ┌──────────────────────┐   │
-│  │ SessionManager│───▶│ MinerSession (User A)│   │
-│  │  (sessions.js)│    │  - bankr API calls   │   │
-│  │               │    │  - solver pipeline   │   │
-│  │               │    │  - mining loop       │   │
-│  │               │    │  - auto-claim        │   │
-│  │               │    │  - credit monitor    │   │
-│  │               │    │  - SSE broadcast     │   │
-│  │               │    └──────────────────────┘   │
-│  │               │    ┌──────────────────────┐   │
-│  │               │───▶│ MinerSession (User B)│   │
-│  │               │    │  (fully isolated)    │   │
-│  └──────────────┘    └──────────────────────┘   │
-└─────────────────────────────────────────────────┘
-```
+Close browser? Mining keeps running server-side.
 
 ## Mining Pipeline (4-Stage)
 
 Each challenge goes through:
 
-1. **Extract** — LLM reads document, answers questions about 25 companies
-2. **Verify** — Second model double-checks answers (catches multi-hop errors)
+1. **Extract** — LLM reads prose document about 25 fictional companies, answers questions
+2. **Verify** *(optional)* — Second model double-checks answers (toggle in UI)
 3. **Parse Constraints** — LLM structures constraints into JSON
-4. **Build Artifact** — LLM generates artifact, local validator checks compliance (up to 3 retries)
+4. **Build Artifact** — LLM generates artifact string, local validator checks compliance (up to 3 retries)
+
+## Supported Models (14)
+
+All models available through Bankr LLM Gateway, switchable live from the UI:
+
+| Provider | Models |
+|----------|--------|
+| **Google** | Gemini 2.5 Flash *(recommended)*, Gemini 2.5 Pro, Gemini 3 Flash, Gemini 3 Pro |
+| **Anthropic** | Claude Sonnet 4.5, Claude Haiku 4.5, Claude Opus 4.5, Claude Opus 4.6 |
+| **OpenAI** | GPT 5.2, GPT 5.2 Codex, GPT 5 Mini, GPT 5 Nano |
+| **Moonshot** | Kimi K2 |
+| **Alibaba** | Qwen Max |
 
 ## Features
 
 - **Non-custodial** — only stores Bankr API key (per-session), no private keys
-- **Plug & play** — enter API key → auto-resolves wallet → auto-buys BOTCOIN → auto-stakes → mines
+- **Auth-first startup** — skips balance checks if already staked (fast path)
+- **Smart auto-fund** — checks BOTCOIN price via DexScreener, calculates exact ETH needed
 - **Multi-user** — cookie-based session isolation, per-user mining loops
-- **Model switching** — live dropdown, takes effect on next LLM call (no restart)
-- **Tier-based staking** — 25M/50M/100M BOTCOIN (1/2/3 credits per solve)
+- **Model switching** — 14 models, live dropdown, takes effect on next LLM call
+- **Dual-model verification** — optional toggle to use a separate model for answer verification
+- **Tier-based staking** — 25M / 50M / 100M BOTCOIN (1 / 2 / 3 credits per solve)
 - **Auto top-up LLM credits** — monitors balance, tops up from USDC
 - **Auto-claim rewards** — every 30 min, checks bonus epochs
 - **Rate limit handling** — exponential backoff with jitter per botcoinskill.md
-- **Real-time UI** — SSE log streaming, pipeline progress, stats
+- **Real-time UI** — SSE log streaming, pipeline progress bar, live stats
+- **Resilient** — retries on Bankr transient errors (balance, swap, staking)
 
 ## Environment Variables
 
@@ -112,15 +118,30 @@ MAX_CONSECUTIVE_FAILURES=5    # Pause after N failures
 COORDINATOR_URL=https://coordinator.agentmoney.net
 ```
 
-## Docker Deployment
+## Deploy
+
+### Railway (Recommended — Free Subdomain)
+
+1. Push to GitHub
+2. [railway.app](https://railway.app) → Deploy from GitHub → Select repo
+3. Add env vars in Railway dashboard
+4. Auto-deploys → get `https://your-app.up.railway.app`
+
+### Docker
 
 ```bash
-# One command
 docker compose up -d
-
-# With custom port
-PORT=8080 docker compose up -d
 ```
+
+### VPS (Direct)
+
+```bash
+npm install -g pm2
+pm2 start src/server.js --name botcoin-miner
+pm2 save && pm2 startup
+```
+
+Access via `http://YOUR_VPS_IP:3000`
 
 ## API Endpoints
 
@@ -130,21 +151,22 @@ PORT=8080 docker compose up -d
 | POST | `/api/start` | Start mining |
 | POST | `/api/stop` | Stop mining |
 | POST | `/api/claim` | Claim rewards |
-| POST | `/api/config` | Switch models |
+| POST | `/api/config` | Switch models, toggle verify |
 | GET | `/api/status` | Session status + stats |
 | GET | `/api/events` | SSE log stream |
-| GET | `/api/info` | Server info (version, active sessions) |
+| GET | `/api/models` | Available LLM models |
+| GET | `/api/info` | Server info |
 | POST | `/api/logout` | Destroy session |
 
 ## Bounty Checklist
 
 - [x] Entirely non-custodial
 - [x] Plug and play (API key → auto wallet → auto fund → auto stake → mine)
-- [x] Model choice selector for LLM gateway
-- [x] Pre-equipped with botcoin miner skill (follows botcoinskill.md flow)
+- [x] Model choice selector (14 models from 5 providers)
+- [x] Pre-equipped with botcoin miner skill (follows botcoinskill.md)
 - [x] Proper rate-limit handling (backoff, jitter, per-endpoint rules)
-- [x] Self-fund inference via top-ups
-- [x] UI with real-time agent output
+- [x] Self-fund inference via auto top-ups
+- [x] UI with real-time agent/LLM output visibility
 - [x] Multi-user service mode
 
 ## License
