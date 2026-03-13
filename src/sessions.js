@@ -209,12 +209,15 @@ class MinerSession {
         return result.response || '';
     }
 
-    async swapForBotcoin(amount) {
+    async swapForBotcoin(amount, ethUsdAvailable) {
         const token = '0xA601877977340862Ca67f816eb079958E5bd0BA3';
-        this.log('info', 'bankr', `Swapping ETH for ${amount.toLocaleString()} BOTCOIN...`);
+        // Use dollar amount per botcoinskill.md spec: "swap $X of ETH to TOKEN on base"
+        // Reserve ~$1 for gas, swap the rest
+        const swapUsd = Math.max(1, Math.min(ethUsdAvailable ? ethUsdAvailable - 1 : 3, 10));
+        this.log('info', 'bankr', `Swapping $${swapUsd.toFixed(0)} of ETH for BOTCOIN...`);
         const { jobId } = await this._fetchBankr('/agent/prompt', {
             method: 'POST',
-            body: JSON.stringify({ prompt: `swap my ETH on base for exactly ${amount} tokens of ${token}` })
+            body: JSON.stringify({ prompt: `swap $${swapUsd.toFixed(0)} of ETH to ${token} on base` })
         });
         const result = await this._pollJob(jobId, 180000);
         return result.response;
@@ -519,7 +522,7 @@ class MinerSession {
                 let funded = false;
                 for (let swapTry = 1; swapTry <= 3; swapTry++) {
                     try {
-                        const swapResult = await this.swapForBotcoin(buyAmount);
+                        const swapResult = await this.swapForBotcoin(buyAmount, ethUsd);
                         if (this.shouldStop) return this._cleanup('User stopped');
                         const swapLower = (swapResult || '').toLowerCase();
                         if (swapLower.includes('insufficient') || swapLower.includes('failed')) {
