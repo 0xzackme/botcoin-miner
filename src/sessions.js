@@ -554,26 +554,63 @@ class MinerSession {
             // Phase 4: Staking
             this.setState(STATES.STAKING);
             this.log('info', 'miner', `Staking ${requiredTokens.toLocaleString()} BOTCOIN...`);
-            try {
+            
+            const doStake = async () => {
                 const approveResp = await coordinator.getStakeApproveCalldata(stakeAmountWei);
                 if (approveResp.transaction) await this.submitTransaction(approveResp.transaction, 'Approve BOTCOIN');
-                if (this.shouldStop) return this._cleanup('User stopped');
+                if (this.shouldStop) return;
                 const stakeResp = await coordinator.getStakeCalldata(stakeAmountWei);
                 if (stakeResp.transaction) await this.submitTransaction(stakeResp.transaction, 'Stake BOTCOIN');
-                this.log('success', 'miner', 'Staking confirmed');
+                this.log('success', 'miner', 'Staking confirmed ✔');
+            };
+
+            try {
+                await doStake();
             } catch (e) {
-                if (e.message?.includes('already') || e.message?.includes('Already') || e.status === 400) {
-                    this.log('info', 'miner', 'Stake already active, continuing...');
+                const msg = e.message || '';
+                if (msg.includes('already') || msg.includes('Already') || e.status === 400) {
+                    // Existing stake — might be old/insufficient. Try unstake → restake
+                    this.log('warn', 'miner', 'Existing stake found. Unstaking and restaking with correct tier...');
+                    try {
+                        const unstakeResp = await coordinator.getUnstakeCalldata();
+                        if (unstakeResp.transaction) await this.submitTransaction(unstakeResp.transaction, 'Unstake BOTCOIN');
+                        await this._sleep(3000);
+                        await doStake();
+                    } catch (e2) {
+                        this.log('warn', 'miner', `Restake failed: ${e2.message.slice(0, 120)}. Will try auth anyway...`);
+                    }
                 } else {
-                    this.log('warn', 'miner', `Staking error: ${e.message} — proceeding...`);
+                    this.log('warn', 'miner', `Staking error: ${msg.slice(0, 120)} — will try auth anyway...`);
                 }
             }
 
             if (this.shouldStop) return this._cleanup('User stopped');
 
-            // Phase 5: Auth
-            await this.ensureAuth();
-            if (this.shouldStop) return this._cleanup('User stopped');
+            // Phase 5: Auth (with recovery for Insufficient stake)
+            try {
+                await this.ensureAuth();
+            } catch (authErr) {
+                const authMsg = authErr.message || '';
+                if (authMsg.includes('Insufficient stake') || authMsg.includes('403')) {
+                    this.log('warn', 'miner', 'Auth says insufficient stake. Attempting unstake → restake...');
+                    try {
+                        this.setState(STATES.STAKING);
+                        const unstakeResp = await coordinator.getUnstakeCalldata();
+                        if (unstakeResp.transaction) await this.submitTransaction(unstakeResp.transaction, 'Unstake BOTCOIN');
+                        await this._sleep(3000);
+                        await doStake();
+                        await this._sleep(2000);
+                        this.setState(STATES.AUTHENTICATING);
+                        await this.ensureAuth();
+                    } catch (e3) {
+                        this.log('error', 'miner', `Recovery failed: ${e3.message.slice(0, 150)}`);
+                        this.log('error', 'miner', `Make sure wallet ${this.walletAddress} has enough BOTCOIN for ${tierInfo?.label || 'staking'}.`);
+                        this.setState(STATES.ERROR); this.isRunning = false; return;
+                    }
+                } else {
+                    throw authErr;
+                }
+            }
 
             // Phase 6: Background services
             this.startCreditMonitor();
