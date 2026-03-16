@@ -806,21 +806,21 @@ class MinerSession {
         const prompts = require('./solver/prompts');
         const validator = require('./solver/validator');
 
-        // Stage 1: Extract
+        // Stage 1: Extract ALL company data + answer questions
         this.broadcast({ type: 'pipeline', stage: 1, detail: 'Extracting data' });
-        this.log('info', 'solver', '📋 Stage 1/4: Extract + Answer...');
+        this.log('info', 'solver', '📋 Stage 1/5: Extract + Answer...');
         const extractPrompt = prompts.extractionPrompt(challenge.doc, challenge.companies, challenge.questions);
         const { content: extractRaw } = await this.callLLM(extractPrompt, this._primaryModel, { json: true, maxTokens: 8192 });
         let extracted = this._parseJSON(extractRaw);
         if (!extracted || !extracted.answers) {
-            extracted = { answers: challenge.questions.map((_, i) => ({ question: i + 1, answer: 'unknown' })) };
+            extracted = { answers: challenge.questions.map((_, i) => ({ question: i + 1, answer: 'unknown' })), companies: [] };
         }
-        this.log('success', 'solver', `Stage 1: ${extracted.answers.length} answers`);
+        this.log('success', 'solver', `Stage 1: ${extracted.answers.length} answers, ${(extracted.companies || []).length} companies`);
 
         // Stage 2: Verify (optional — only when dual-model verification is enabled)
         if (this._verifyEnabled) {
             this.broadcast({ type: 'pipeline', stage: 2, detail: 'Verifying answers' });
-            this.log('info', 'solver', '🔍 Stage 2/4: Verify...');
+            this.log('info', 'solver', '🔍 Stage 2/5: Verify...');
             const verifyPrompt = prompts.verificationPrompt(challenge.doc, challenge.companies, challenge.questions, extracted);
             const { content: verifyRaw } = await this.callLLM(verifyPrompt, this._verifyModel || this._primaryModel, { json: true });
             const verified = this._parseJSON(verifyRaw);
@@ -828,7 +828,21 @@ class MinerSession {
                 let corrections = 0;
                 for (const v of verified.answers) {
                     const orig = extracted.answers.find(a => a.question === v.question);
-                    if (orig && v.answer !== orig.answer) { orig.answer = v.answer; corrections++; }
+                    if (orig && v.answer !== orig.answer) {
+                        orig.answer = v.answer;
+                        orig.initials = v.initials || orig.initials;
+                        corrections++;
+                    }
+                }
+                // Apply company data corrections
+                if (verified.company_corrections) {
+                    for (const fix of verified.company_corrections) {
+                        const company = extracted.companies?.find(c => c.name === fix.name);
+                        if (company && fix.field && fix.new_value) {
+                            company[fix.field] = fix.new_value;
+                            this.log('info', 'solver', `Fixed ${fix.name}.${fix.field}: "${fix.old_value}" → "${fix.new_value}"`);
+                        }
+                    }
                 }
                 this.log('success', 'solver', `Stage 2: ${corrections} correction(s)`);
             }
@@ -838,21 +852,45 @@ class MinerSession {
 
         // Stage 3: Parse constraints
         this.broadcast({ type: 'pipeline', stage: 3, detail: 'Parsing constraints' });
-        this.log('info', 'solver', '🧩 Stage 3/4: Parse constraints...');
+        this.log('info', 'solver', '🧩 Stage 3/5: Parse constraints...');
         const constraintPrompt = prompts.constraintParsingPrompt(challenge.constraints);
         const { content: constraintRaw } = await this.callLLM(constraintPrompt, this._primaryModel, { json: true });
         const parsedConstraints = this._parseJSON(constraintRaw)?.parsed || null;
         if (parsedConstraints) this.log('success', 'solver', `Stage 3: ${parsedConstraints.length} constraints parsed`);
 
-        // Stage 4: Build artifact
+        // Stage 3.5: Pre-compute all constraint values
+        let computedValues = null;
+        this.broadcast({ type: 'pipeline', stage: 3.5, detail: 'Computing constraint values' });
+        this.log('info', 'solver', '🔢 Stage 3.5/5: Computing constraint values...');
+        const computePrompt = prompts.computationPrompt(
+            extracted.answers, extracted.companies || [],
+            challenge.constraints, parsedConstraints
+        );
+        const { content: computeRaw } = await this.callLLM(computePrompt, this._primaryModel, { json: true, maxTokens: 8192 });
+        computedValues = this._parseJSON(computeRaw);
+        if (computedValues?.computations) {
+            this.log('success', 'solver', `Stage 3.5: ${computedValues.computations.length} values computed`);
+            if (computedValues.must_include_values?.length) {
+                this.log('info', 'solver', `Must include: ${computedValues.must_include_values.join(' | ')}`);
+            }
+            if (computedValues.acrostic_letters) {
+                this.log('info', 'solver', `Acrostic: ${computedValues.acrostic_letters}`);
+            }
+        } else {
+            this.log('warn', 'solver', 'Stage 3.5: Computation failed, proceeding without pre-computed values');
+            computedValues = null;
+        }
+
+        // Stage 4: Build artifact using pre-computed values
         this.broadcast({ type: 'pipeline', stage: 4, detail: 'Building artifact' });
-        this.log('info', 'solver', '🔨 Stage 4/4: Build artifact...');
+        this.log('info', 'solver', '🔨 Stage 4/5: Build artifact...');
         let lastArtifact = null, lastErrors = null;
         for (let attempt = 1; attempt <= 3; attempt++) {
             const buildPrompt = prompts.artifactBuildPrompt(
                 challenge.questions, extracted.answers, challenge.constraints,
                 parsedConstraints, challenge.solveInstructions,
-                lastArtifact, lastErrors, challenge.proposal
+                lastArtifact, lastErrors, challenge.proposal,
+                extracted.companies || [], computedValues
             );
             const { content } = await this.callLLM(buildPrompt, this._primaryModel, { temperature: 0.15 });
             let artifact = challenge.proposal ? content : (content.split('\n').filter(l => l.trim())[0] || content);
