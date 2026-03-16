@@ -7,89 +7,74 @@ function getInitials(name) {
     return name.split(/\s+/).map(w => w[0] || '').join('').toUpperCase();
 }
 
-// Stage 1: Extract ALL company data + answer questions
+// Stage 1: Answer questions with careful multi-hop reasoning
 function extractionPrompt(doc, companies, questions) {
-    return `You are an expert data extraction agent for a complex challenge. You must be EXTREMELY precise.
+    return `You are solving a reading comprehension challenge. Read the document and answer each question.
 
-## YOUR TASK
-1. Read the ENTIRE document carefully
-2. Extract EVERY fact about EACH company
-3. Answer ALL questions using ONLY factual (non-hypothetical, non-speculative) statements
+## CRITICAL INSTRUCTIONS
 
-## CRITICAL RULES
-- Companies use MULTIPLE names/aliases throughout the document. Track ALL of them.
-- IGNORE hypothetical statements ("if", "would", "could", "might", "projected")
-- IGNORE speculative/future-looking statements — use ONLY stated facts
-- For multi-hop questions (e.g. "highest revenue"), you MUST compare ALL companies before answering
-- Numbers must be EXACT — they are used in mathematical computations later
+### How to Answer
+For EACH question, follow this process:
+1. Read the question carefully — what EXACTLY is being asked?
+2. Search the ENTIRE document for relevant data
+3. For comparison questions (highest/lowest/most/fewest), you MUST:
+   - Find ALL candidates with relevant data
+   - List each candidate's value
+   - Compare them ALL
+   - Pick the correct one
+4. Your answer MUST be an EXACT company name from the official list below
+
+### Traps to Avoid
+- **Aliases**: Companies use multiple names. "QS", "Quantum Sol", "Quantum Solutions Inc" may all be the same company. Always map back to the official name.
+- **Red herrings**: IGNORE any statement using: "if", "would", "could", "might", "projected", "planned", "estimated", "expected", "hypothetically", "potentially". Only use STATED FACTS.
+- **Recency bias**: Don't pick the first company you find. Read ALL data before answering comparison questions.
+- **Revenue/Employee tricks**: Some numbers include subsidiaries, some don't. Use the number that matches what the question asks.
+
+### Official Company Names (answers MUST exactly match one of these)
+${companies.join(', ')}
 
 ## DOCUMENT
 ${doc}
-
-## COMPANIES (official names — answers MUST match one of these exactly)
-${companies.join(', ')}
 
 ## QUESTIONS
 ${questions.map((q, i) => `Q${i + 1}: ${q}`).join('\n')}
 
 ## RESPONSE FORMAT (JSON)
 {
-  "companies": [
-    {
-      "name": "OfficialCompanyName",
-      "aliases": ["AlternateName1", "Abbrev"],
-      "headquarters_city": "CityName",
-      "headquarters_country": "CountryName",
-      "ceo_name": "FirstName LastName",
-      "ceo_last_name": "LastName",
-      "revenue": "$X.Y billion",
-      "revenue_numeric": 4200000000,
-      "employees": 12500,
-      "founding_year": 2010,
-      "industry": "tech/finance/etc",
-      "facts": ["key fact 1", "key fact 2"]
-    }
-  ],
   "answers": [
     {
       "question": 1,
       "answer": "ExactOfficialCompanyName",
       "initials": "EOCN",
-      "reasoning": "Step-by-step explanation of how you determined this answer"
+      "reasoning": "DETAILED step-by-step: I found X=100, Y=200, Z=150. Y is highest. Y's official name is CompanyName."
     }
   ]
 }
 
-IMPORTANT:
-- "answer" MUST be an exact match from the companies list above
-- "initials" = first letter of each word in the official company name, UPPERCASED
-- "revenue_numeric" = revenue converted to raw number (e.g. "$4.2 billion" → 4200000000)
-- "employees" = raw number (e.g. "twelve thousand" → 12000)
-- Extract ALL 25 companies even if some have sparse data`;
+RULES:
+- "answer" must EXACTLY match one company name from the official list
+- "initials" = first letter of each word, UPPERCASED (e.g. "Quantum Solutions" → "QS")
+- "reasoning" must show your work for comparison questions — list ALL candidates and their values
+- Return answers for ALL ${questions.length} questions`;
 }
 
-// Stage 2: Verify constraint-critical data with chain-of-thought
-function verificationPrompt(doc, companies, questions, extractedData) {
-    return `You are a VERIFICATION agent. Your job is to find and fix errors in the previous extraction.
 
-## PREVIOUS EXTRACTION RESULTS
+// Stage 2: Verify answers
+function verificationPrompt(doc, companies, questions, extractedData) {
+    return `You are a VERIFICATION agent. Re-read the document and check if these answers are correct.
+
+## PREVIOUS ANSWERS TO VERIFY
 ${JSON.stringify(extractedData.answers, null, 2)}
 
-## COMPANY DATA EXTRACTED
-${JSON.stringify((extractedData.companies || []).map(c => ({
-    name: c.name, headquarters_city: c.headquarters_city, headquarters_country: c.headquarters_country,
-    ceo_name: c.ceo_name, employees: c.employees, revenue: c.revenue
-})), null, 2)}
+## VERIFICATION STEPS
+For EACH answer:
+1. Re-read the document and find evidence for/against this answer
+2. For comparison questions (highest/lowest/most), list ALL candidates and verify the right one was picked
+3. Check the company name matches the official list EXACTLY
+4. Watch for RED HERRINGS: ignore hypothetical/speculative/projected statements
+5. ONLY correct an answer if you are CONFIDENT the original is wrong
 
-## VERIFICATION CHECKLIST — Go through each one:
-1. For EACH answer, re-read the document and verify the reasoning
-2. For multi-hop questions (highest/lowest/most/largest), COMPARE ALL candidates
-3. Check that company names match the official list EXACTLY (case-sensitive)
-4. Verify HQ city, HQ country, CEO name, employee count, revenue for EACH answer company
-5. Watch for RED HERRINGS: hypothetical statements, projected numbers, speculative scenarios
-6. Verify aliases — make sure you attributed facts to the RIGHT company
-
-## DOCUMENT (re-read carefully)
+## DOCUMENT
 ${doc}
 
 ## COMPANIES (official names)
@@ -108,19 +93,10 @@ ${questions.map((q, i) => `Q${i + 1}: ${q}`).join('\n')}
       "confidence": "high|medium|low",
       "correction": "explanation if changed, or null"
     }
-  ],
-  "company_corrections": [
-    {
-      "name": "CompanyName",
-      "field": "headquarters_city",
-      "old_value": "wrong",
-      "new_value": "correct",
-      "evidence": "quote from document"
-    }
   ]
 }
 
-Be AGGRESSIVE about corrections. It's better to fix a wrong answer than to leave it.`;
+IMPORTANT: Only change answers you are CONFIDENT are wrong. If unsure, keep the original answer.`;
 }
 
 // Stage 3: Parse constraints into structured format
