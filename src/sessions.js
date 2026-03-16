@@ -806,144 +806,64 @@ class MinerSession {
         const prompts = require('./solver/prompts');
         const validator = require('./solver/validator');
 
-        // Stage 1: Extract ALL company data + answer questions
-        this.broadcast({ type: 'pipeline', stage: 1, detail: 'Extracting data' });
-        this.log('info', 'solver', '📋 Stage 1/5: Extract + Answer...');
-        const extractPrompt = prompts.extractionPrompt(challenge.doc, challenge.companies, challenge.questions);
-        const { content: extractRaw } = await this.callLLM(extractPrompt, this._primaryModel, { json: true, maxTokens: 8192 });
-        let extracted = this._parseJSON(extractRaw);
-        if (!extracted || !extracted.answers) {
-            extracted = { answers: challenge.questions.map((_, i) => ({ question: i + 1, answer: 'unknown' })), companies: [] };
-        }
-        this.log('success', 'solver', `Stage 1: ${extracted.answers.length} answers, ${(extracted.companies || []).length} companies`);
-
-        // Stage 2: Verify (optional — only when dual-model verification is enabled)
-        if (this._verifyEnabled) {
-            this.broadcast({ type: 'pipeline', stage: 2, detail: 'Verifying answers' });
-            this.log('info', 'solver', '🔍 Stage 2/5: Verify...');
-            const verifyPrompt = prompts.verificationPrompt(challenge.doc, challenge.companies, challenge.questions, extracted);
-            const { content: verifyRaw } = await this.callLLM(verifyPrompt, this._verifyModel || this._primaryModel, { json: true });
-            const verified = this._parseJSON(verifyRaw);
-            if (verified?.answers) {
-                let corrections = 0;
-                for (const v of verified.answers) {
-                    const orig = extracted.answers.find(a => a.question === v.question);
-                    if (orig && v.answer !== orig.answer) corrections++;
-                }
-                // Safeguard: if verify corrects >50% of answers, it's probably wrong — skip
-                const total = extracted.answers.length;
-                if (corrections > total * 0.5) {
-                    this.log('warn', 'solver', `Stage 2: ${corrections}/${total} corrections (>50%) — too many, keeping original answers`);
-                } else {
-                    // Apply corrections
-                    for (const v of verified.answers) {
-                        const orig = extracted.answers.find(a => a.question === v.question);
-                        if (orig && v.answer !== orig.answer) {
-                            this.log('info', 'solver', `Corrected Q${v.question}: "${orig.answer}" → "${v.answer}"`);
-                            orig.answer = v.answer;
-                            orig.initials = v.initials || orig.initials;
-                        }
-                    }
-                    // Apply company data corrections
-                    if (verified.company_corrections) {
-                        for (const fix of verified.company_corrections) {
-                            const company = extracted.companies?.find(c => c.name === fix.name);
-                            if (company && fix.field && fix.new_value) {
-                                company[fix.field] = fix.new_value;
-                            }
-                        }
-                    }
-                    this.log('success', 'solver', `Stage 2: ${corrections} correction(s) applied`);
-                }
-            }
-        } else {
-            this.log('info', 'solver', '⏩ Stage 2: Skipped (dual-model verification disabled)');
-        }
-
-        // Stage 3: Parse constraints
-        this.broadcast({ type: 'pipeline', stage: 3, detail: 'Parsing constraints' });
-        this.log('info', 'solver', '🧩 Stage 3/5: Parse constraints...');
-        const constraintPrompt = prompts.constraintParsingPrompt(challenge.constraints);
-        const { content: constraintRaw } = await this.callLLM(constraintPrompt, this._primaryModel, { json: true });
-        const parsedConstraints = this._parseJSON(constraintRaw)?.parsed || null;
-        if (parsedConstraints) this.log('success', 'solver', `Stage 3: ${parsedConstraints.length} constraints parsed`);
-
-        // Stage 3.5: Pre-compute all constraint values
-        let computedValues = null;
-        this.broadcast({ type: 'pipeline', stage: 3.5, detail: 'Computing constraint values' });
-        this.log('info', 'solver', '🔢 Stage 3.5/5: Computing constraint values...');
-        const computePrompt = prompts.computationPrompt(
-            challenge.doc, extracted.answers,
-            challenge.constraints, parsedConstraints
+        // ── Stage 1: SOLVE — answers + compute in one reasoning chain ──
+        this.broadcast({ type: 'pipeline', stage: 1, detail: 'Solving challenge' });
+        this.log('info', 'solver', '🧠 Stage 1/2: Solve (answers + compute)...');
+        const solvePromptText = prompts.solvePrompt(
+            challenge.doc, challenge.companies, challenge.questions, challenge.constraints
         );
-        const { content: computeRaw } = await this.callLLM(computePrompt, this._primaryModel, { json: true, maxTokens: 8192 });
-        computedValues = this._parseJSON(computeRaw);
-        if (computedValues?.computations) {
-            this.log('success', 'solver', `Stage 3.5: ${computedValues.computations.length} values computed`);
-            if (computedValues.must_include_values?.length) {
-                this.log('info', 'solver', `Must include: ${computedValues.must_include_values.join(' | ')}`);
-            }
-            if (computedValues.acrostic_letters) {
-                this.log('info', 'solver', `Acrostic: ${computedValues.acrostic_letters}`);
-            }
+        this.log('info', 'solver', `Prompt: ${solvePromptText.length} chars`);
+        const { content: solveRaw } = await this.callLLM(solvePromptText, this._primaryModel, { json: true, maxTokens: 8192 });
+        const solved = this._parseJSON(solveRaw);
 
-            // Merge computed values back into parsed constraints for validator
-            if (parsedConstraints && computedValues.computations) {
-                for (const comp of computedValues.computations) {
-                    // Robust index matching: handle string/number mismatch
-                    const ci = parseInt(comp.constraint_index);
-                    const pc = parsedConstraints.find(p => parseInt(p.index) === ci);
-                    const val = String(comp.required_value || '');
-                    // Skip bad values
-                    if (!val || val === '?' || val === 'null' || val === 'undefined' ||
-                        val.toLowerCase().includes('missing') || val.toLowerCase().includes('unknown')) {
-                        continue;
-                    }
-                    if (pc) {
-                        this.log('info', 'solver', `C${ci}: "${pc.value}" → "${val}"`);
-                        pc.value = val;
-                        pc.computed = true;
-                    }
-                }
-                // Update acrostic if computed
-                if (computedValues.acrostic_letters) {
-                    const acrosticPC = parsedConstraints.find(p => p.type === 'acrostic');
-                    if (acrosticPC) {
-                        acrosticPC.value = computedValues.acrostic_letters;
-                        acrosticPC.computed = true;
-                    }
-                }
-                // Update word count if computed
-                if (computedValues.target_word_count) {
-                    const wcPC = parsedConstraints.find(p => p.type === 'word_count');
-                    if (wcPC) wcPC.value = parseInt(computedValues.target_word_count);
-                }
-                // Update forbidden letters
-                if (computedValues.forbidden_letters?.length) {
-                    const flPC = parsedConstraints.find(p => p.type === 'forbidden_letter');
-                    if (flPC && !flPC.value) flPC.value = computedValues.forbidden_letters[0];
-                }
-            }
-        } else {
-            this.log('warn', 'solver', 'Stage 3.5: Computation failed, proceeding without pre-computed values');
-            computedValues = null;
+        if (!solved || !solved.answers) {
+            this.log('error', 'solver', 'Stage 1 failed: no answers returned');
+            return '';
         }
 
-        // Stage 4: Build artifact using pre-computed values
-        this.broadcast({ type: 'pipeline', stage: 4, detail: 'Building artifact' });
-        this.log('info', 'solver', '🔨 Stage 4/5: Build artifact...');
+        const cc = solved.computed_constraints || {};
+        this.log('success', 'solver', `Stage 1: ${solved.answers.length} answers`);
+
+        // Log computed values
+        if (cc.word_count) this.log('info', 'solver', `Word count: ${cc.word_count}`);
+        if (cc.forbidden_letter) this.log('info', 'solver', `Forbidden: "${cc.forbidden_letter}"`);
+        if (cc.acrostic_letters) this.log('info', 'solver', `Acrostic: ${cc.acrostic_letters}`);
+        if (cc.must_include?.length) this.log('info', 'solver', `Must include: ${cc.must_include.join(' | ')}`);
+        if (cc.details?.length) {
+            for (const d of cc.details) {
+                this.log('info', 'solver', `C${d.constraint}: "${d.value}" — ${d.work?.slice(0, 80)}`);
+            }
+        }
+
+        // Build parsed constraints for local validator (only what we can check)
+        const parsedConstraints = [];
+        if (cc.word_count) parsedConstraints.push({ index: 'wc', type: 'word_count', value: parseInt(cc.word_count) });
+        if (cc.forbidden_letter) parsedConstraints.push({ index: 'fl', type: 'forbidden_letter', value: cc.forbidden_letter });
+        if (cc.acrostic_letters) parsedConstraints.push({ index: 'ac', type: 'acrostic', value: cc.acrostic_letters });
+        if (cc.must_include?.length) {
+            for (let i = 0; i < cc.must_include.length; i++) {
+                const v = cc.must_include[i];
+                if (v && v.trim()) parsedConstraints.push({ index: `mi${i}`, type: 'must_include', value: v });
+            }
+        }
+
+        // ── Stage 2: BUILD — assemble artifact ──
+        this.broadcast({ type: 'pipeline', stage: 2, detail: 'Building artifact' });
+        this.log('info', 'solver', '🔨 Stage 2/2: Build artifact...');
         let lastArtifact = null, lastErrors = null;
         for (let attempt = 1; attempt <= 3; attempt++) {
-            const buildPrompt = prompts.artifactBuildPrompt(
-                challenge.questions, extracted.answers, challenge.constraints,
-                parsedConstraints, challenge.solveInstructions,
-                lastArtifact, lastErrors, challenge.proposal,
-                extracted.companies || [], computedValues
+            const bp = prompts.buildPrompt(
+                solved.answers, cc, challenge.constraints,
+                lastArtifact, lastErrors,
+                challenge.solveInstructions, challenge.proposal
             );
-            const { content } = await this.callLLM(buildPrompt, this._primaryModel, { temperature: 0.15 });
+            const { content } = await this.callLLM(bp, this._primaryModel, { temperature: 0.15 });
             let artifact = challenge.proposal ? content : (content.split('\n').filter(l => l.trim())[0] || content);
 
-            if (parsedConstraints) {
+            // Strip any quotes/preamble
+            artifact = artifact.replace(/^["']|["']$/g, '').trim();
+
+            if (parsedConstraints.length > 0) {
                 const result = validator.validate(artifact, parsedConstraints);
                 if (result.valid) {
                     this.log('success', 'solver', `Artifact built (attempt ${attempt}) ✔`);
