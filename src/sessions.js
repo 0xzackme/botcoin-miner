@@ -671,10 +671,27 @@ class MinerSession {
                     }
                 }
 
-                // Auth after staking
+                // Auth after staking — delay to let coordinator index new stake
                 if (this.shouldStop) return this._cleanup('User stopped');
                 this.setState(STATES.AUTHENTICATING);
-                await this.ensureAuth();
+                this.log('info', 'miner', 'Waiting for coordinator to index new stake...');
+                await this._sleep(5000);
+
+                let postStakeAuth = false;
+                for (let authAttempt = 1; authAttempt <= 3 && !postStakeAuth; authAttempt++) {
+                    try {
+                        await this.ensureAuth();
+                        postStakeAuth = true;
+                    } catch (authErr) {
+                        const msg = authErr.message || '';
+                        if ((msg.includes('Insufficient') || authErr.status === 403) && authAttempt < 3) {
+                            this.log('warn', 'miner', `Auth attempt ${authAttempt}/3: stake not indexed yet, waiting ${authAttempt * 10}s...`);
+                            await this._sleep(authAttempt * 10000);
+                        } else {
+                            throw authErr;
+                        }
+                    }
+                }
             }
 
             // Phase 6: Background services
@@ -730,7 +747,7 @@ class MinerSession {
 
     async _mineOnce() {
         await this.ensureAuth();
-        const nonce = crypto.randomBytes(16).toString('hex');
+        const nonce = nodeCrypto.randomBytes(16).toString('hex');
         const challenge = await coordinator.getChallenge(this.walletAddress, nonce, this.authToken);
         this.stats.challengesAttempted++;
 
