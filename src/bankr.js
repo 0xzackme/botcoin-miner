@@ -4,16 +4,17 @@
 // Non-custodial: only uses the user's BANKR_API_KEY.
 
 const log = require('./logger');
+const keyCrypto = require('./crypto');
 
 const AGENT_URL = 'https://api.bankr.bot';
 const LLM_URL = 'https://llm.bankr.bot';
 
-let apiKey = null;
+let encryptedApiKey = null;
 let isAborted = false;
 let abortController = new AbortController();
 
 function init(key) {
-    apiKey = key;
+    encryptedApiKey = key ? keyCrypto.encrypt(key) : null;
 }
 
 function abort() {
@@ -26,7 +27,7 @@ function resetAbort() {
 }
 
 function headers(json = false) {
-    const h = { 'X-API-Key': apiKey };
+    const h = { 'X-API-Key': _getApiKey() };
     if (json) h['Content-Type'] = 'application/json';
     return h;
 }
@@ -219,7 +220,7 @@ async function listModels() {
     }));
 }
 
-function _getApiKey() { return apiKey; }
+function _getApiKey() { return encryptedApiKey ? keyCrypto.decrypt(encryptedApiKey) : null; }
 
 module.exports = {
     init,

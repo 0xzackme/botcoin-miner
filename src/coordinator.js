@@ -15,10 +15,32 @@ function init(url) { baseUrl = url || DEFAULT_URL; }
 const BACKOFF = [2000, 4000, 8000, 16000, 30000, 60000];
 const MAX_WAIT_MS = 120000; // never wait more than 2 minutes
 
+// Timeout per endpoint type (ms)
+const TIMEOUTS = {
+    auth: 15000,
+    challenge: 45000,
+    submit: 45000,
+    stake: 30000,
+    unstake: 30000,
+    claim: 30000,
+    bonus: 30000,
+    epoch: 15000,
+    credits: 15000,
+    token: 15000,
+    coordinator: 30000  // default
+};
+
 async function retryFetch(url, opts = {}, label = 'coordinator') {
+    const timeoutMs = TIMEOUTS[label] || TIMEOUTS.coordinator;
+
     for (let i = 0; i <= BACKOFF.length; i++) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+
         try {
-            const res = await fetch(url, opts);
+            const fetchOpts = { ...opts, signal: controller.signal };
+            const res = await fetch(url, fetchOpts);
+            clearTimeout(timer);
             const text = await res.text();
             let body;
             try { body = JSON.parse(text); } catch { body = { raw: text }; }
@@ -57,6 +79,16 @@ async function retryFetch(url, opts = {}, label = 'coordinator') {
             err.body = body;
             throw err;
         } catch (e) {
+            clearTimeout(timer);
+            if (e.name === 'AbortError') {
+                if (i < BACKOFF.length) {
+                    const wait = Math.min(BACKOFF[i], MAX_WAIT_MS);
+                    log.warn(label, `Request timeout (${timeoutMs / 1000}s) on ${url.split('?')[0]} — retrying in ${Math.round(wait / 1000)}s`);
+                    await bankr.sleep(wait);
+                    continue;
+                }
+                throw new Error(`Request timeout after ${BACKOFF.length + 1} attempts on ${url.split('?')[0]}`);
+            }
             if (e.status) throw e; // HTTP error already structured
             if (i < BACKOFF.length) {
                 const wait = Math.min(BACKOFF[i] + Math.random() * BACKOFF[i] * 0.25, MAX_WAIT_MS);

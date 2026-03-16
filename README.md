@@ -79,6 +79,41 @@ All models available through Bankr LLM Gateway, switchable live from the UI:
 | **Moonshot** | Kimi K2 |
 | **Alibaba** | Qwen Max |
 
+## Security
+
+### API Key Encryption at Rest
+
+All API keys are encrypted using **AES-256-GCM** and only decrypted on demand for API calls. Zero plaintext keys stored in memory at rest.
+
+| File | Storage | Decryption |
+|------|---------|------------|
+| `sessions.js` | `_encryptedApiKey` | `_getApiKey()` per Bankr/LLM call |
+| `bankr.js` | `encryptedApiKey` | `_getApiKey()` in `headers()` |
+| `pipeline.js` | `encryptedApiKey` | Decrypted in `callLLM()` only |
+| `server.js` | `ENCRYPTED_API_KEY` | Decrypted in `/api/models` only |
+
+Set `ENCRYPTION_KEY` env var (64 hex chars) for persistence across server restarts.
+
+### Coordinator Request Timeouts
+
+Per-endpoint **AbortController** timeouts prevent hanging requests:
+
+| Endpoint | Timeout | Label |
+|----------|---------|-------|
+| Auth (nonce/verify) | 15s | `auth` |
+| Challenge | 45s | `challenge` |
+| Submit solution | 45s | `submit` |
+| Stake/Unstake/Withdraw | 30s | `stake`/`unstake` |
+| Claims/Bonus | 30s | `claim`/`bonus` |
+| Epoch/Credits/Token | 15s | `epoch`/`credits`/`token` |
+
+All timeouts include automatic retry with backoff on `AbortError`.
+
+### Other
+
+- **Non-custodial** — no private keys stored, only Bankr API key (encrypted)
+- **Session isolation** — each user's data is fully isolated via cookie-based sessions
+
 ## Features
 
 - **Non-custodial** — only stores Bankr API key (per-session), no private keys

@@ -5,13 +5,14 @@
 // - Local mode (BANKR_API_KEY in .env): auto-creates "local" session
 // - Service mode (web): users enter API key, get a session cookie
 
-const crypto = require('crypto');
+const nodeCrypto = require('crypto');
 const bankr = require('./bankr');
 const coordinator = require('./coordinator');
 const solver = require('./solver/pipeline');
 const credits = require('./credits');
 const log = require('./logger');
 const { classify, AuthError, CreditError, FatalError, RetryableError } = require('./errors');
+const keyCrypto = require('./crypto');
 const path = require('path');
 const fs = require('fs');
 
@@ -44,7 +45,6 @@ const STATES = {
 class MinerSession {
     constructor(sessionId, apiKey) {
         this.sessionId = sessionId;
-        this.apiKey = apiKey;
         this.createdAt = Date.now();
         this.lastActivity = Date.now();
 
@@ -77,10 +77,16 @@ class MinerSession {
         this.abortController = new AbortController();
 
         // Per-session bankr/solver instances (create isolated copies)
-        this._bankrApiKey = apiKey;
+        // API key encrypted at rest — only decrypted when needed for API calls
+        this._encryptedApiKey = keyCrypto.encrypt(apiKey);
         this._primaryModel = process.env.LLM_MODEL || 'gemini-2.5-flash';
         this._verifyModel = process.env.LLM_MODEL_VERIFY || null;
         this._verifyEnabled = false;
+    }
+
+    /** Decrypt API key on demand — never stored in plain text at rest */
+    _getApiKey() {
+        return keyCrypto.decrypt(this._encryptedApiKey);
     }
 
     touch() { this.lastActivity = Date.now(); }
@@ -124,7 +130,7 @@ class MinerSession {
             isRunning: this.isRunning,
             walletAddress: this.walletAddress,
             stats: this.stats,
-            hasApiKey: !!this._bankrApiKey,
+            hasApiKey: !!this._encryptedApiKey,
             model: this._primaryModel,
             verifyModel: this._verifyModel || this._primaryModel,
             sessionId: this.sessionId
@@ -139,7 +145,7 @@ class MinerSession {
     // ─── Bankr calls (use session's API key) ────────────
 
     _headers(withContent) {
-        const h = { 'X-API-Key': this._bankrApiKey };
+        const h = { 'X-API-Key': this._getApiKey() };
         if (withContent) h['Content-Type'] = 'application/json';
         return h;
     }
@@ -262,7 +268,7 @@ class MinerSession {
         try {
             res = await fetch('https://llm.bankr.bot/v1/chat/completions', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-API-Key': this._bankrApiKey },
+                headers: { 'Content-Type': 'application/json', 'X-API-Key': this._getApiKey() },
                 body: JSON.stringify(body),
                 signal: controller.signal
             });
@@ -345,7 +351,7 @@ class MinerSession {
     async checkAndTopUpCredits() {
         try {
             const res = await fetch('https://llm.bankr.bot/v1/credits', {
-                headers: { 'X-API-Key': this._bankrApiKey }
+                headers: { 'X-API-Key': this._getApiKey() }
             });
             if (!res.ok) return;
             const data = await res.json();
@@ -838,7 +844,7 @@ class SessionManager {
     }
 
     create(apiKey) {
-        const sessionId = crypto.randomBytes(16).toString('hex');
+        const sessionId = nodeCrypto.randomBytes(16).toString('hex');
         const session = new MinerSession(sessionId, apiKey);
         this.sessions.set(sessionId, session);
         log.info('sessions', `New session ${sessionId.slice(0, 8)}... (${this.sessions.size} active)`);

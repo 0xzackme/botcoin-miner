@@ -3,6 +3,8 @@
 // Local mode: BANKR_API_KEY in .env → auto-creates local session
 // Service mode: Users enter API key via UI → get session cookie
 
+const keyCrypto = require('./crypto');
+
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
@@ -17,13 +19,14 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 // ─── Session Manager ────────────────────────────────────
 
 const sessions = new SessionManager();
-const API_KEY = process.env.BANKR_API_KEY || null;
+const RAW_KEY = process.env.BANKR_API_KEY || null;
+const ENCRYPTED_API_KEY = RAW_KEY ? keyCrypto.encrypt(RAW_KEY) : null;
 coordinator.init(process.env.COORDINATOR_URL);
 
 // Auto-create local session if API key in .env
 let localSession = null;
-if (API_KEY) {
-    localSession = sessions.create(API_KEY);
+if (RAW_KEY) {
+    localSession = sessions.create(RAW_KEY); // constructor encrypts it
     localSession.sessionId = 'local';
     sessions.sessions.set('local', localSession);
     log.info('server', 'Local session created from .env BANKR_API_KEY');
@@ -211,7 +214,7 @@ app.post('/api/config', (req, res) => {
 app.get('/api/models', async (req, res) => {
     try {
         const session = getSession(req, res);
-        const apiKey = session?._bankrApiKey || API_KEY;
+        const apiKey = session ? session._getApiKey() : (ENCRYPTED_API_KEY ? keyCrypto.decrypt(ENCRYPTED_API_KEY) : null);
         if (!apiKey) return res.json(defaultModels());
 
         const r = await fetch('https://llm.bankr.bot/v1/models', { headers: { 'X-API-Key': apiKey } });
@@ -297,7 +300,7 @@ const PORT = parseInt(process.env.PORT) || 3000;
 
 const server = app.listen(PORT, () => {
     log.success('server', `BOTCOIN Miner running at http://localhost:${PORT}`);
-    log.info('server', `Mode: ${API_KEY ? 'Local + Service' : 'Service only'}`);
+    log.info('server', `Mode: ${ENCRYPTED_API_KEY ? 'Local + Service' : 'Service only'}`);
     log.info('server', `Active sessions: ${sessions.getActiveCount()}`);
 });
 

@@ -11,10 +11,11 @@ const log = require('../logger');
 const prompts = require('./prompts');
 const validator = require('./validator');
 const { CreditError, RetryableError } = require('../errors');
+const keyCrypto = require('../crypto');
 
 const LLM_URL = 'https://llm.bankr.bot/v1/chat/completions';
 
-let apiKey = null;
+let encryptedApiKey = null;
 let primaryModel = 'gemini-2.5-flash';
 let verifyModel = null; // Falls back to primaryModel if not set
 
@@ -24,7 +25,7 @@ const LLM_TIMEOUT_MS = 300000; // 5 minutes
 // ─── Init ───────────────────────────────────────────────
 
 function init(key, model, verificationModel) {
-    apiKey = key;
+    encryptedApiKey = key ? keyCrypto.encrypt(key) : null;
     if (model) primaryModel = model;
     if (verificationModel) verifyModel = verificationModel;
 }
@@ -62,7 +63,7 @@ async function callLLM(prompt, model, options = {}) {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'X-API-Key': apiKey
+                'X-API-Key': encryptedApiKey ? keyCrypto.decrypt(encryptedApiKey) : null
             },
             body: JSON.stringify(body),
             signal: controller.signal
