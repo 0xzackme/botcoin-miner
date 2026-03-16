@@ -511,6 +511,7 @@ class MinerSession {
                 this.log('info', 'miner', `Staking ${requiredTokens.toLocaleString()} BOTCOIN (${tierInfo?.label || 'selected tier'})...`);
 
                 let stakeOk = false;
+                let alreadyStaked = false;
                 try {
                     const approveResp = await coordinator.getStakeApproveCalldata(stakeAmountWei);
                     if (approveResp.transaction) await this.submitTransaction(approveResp.transaction, 'Approve BOTCOIN');
@@ -520,29 +521,38 @@ class MinerSession {
                     this.log('success', 'miner', 'Staking confirmed ✔');
                 } catch (stakeErr) {
                     const msg = stakeErr.message || '';
-                    if (msg.includes('already') || msg.includes('Already') || stakeErr.status === 400) {
-                        // Already staked — unstake and restake with correct tier
-                        this.log('warn', 'miner', 'Old stake found. Unstaking → restaking with correct tier...');
+                    if (msg.includes('already') || msg.includes('Already') || msg.includes('UnstakePending') || stakeErr.status === 400) {
+                        // Already staked — DO NOT auto-unstake!
+                        // Unstaking has a 24h cooldown and immediately removes mining eligibility.
+                        alreadyStaked = true;
+                        this.log('warn', 'miner', '⚠ Existing stake found — cannot re-stake on top.');
+                        this.log('info', 'miner', 'Attempting auth with current stake...');
+                        
+                        // Try auth anyway — maybe existing stake IS sufficient
                         try {
-                            const unstakeResp = await coordinator.getUnstakeCalldata();
-                            if (unstakeResp.transaction) await this.submitTransaction(unstakeResp.transaction, 'Unstake BOTCOIN');
-                            await this._sleep(3000);
-                            const approveResp2 = await coordinator.getStakeApproveCalldata(stakeAmountWei);
-                            if (approveResp2.transaction) await this.submitTransaction(approveResp2.transaction, 'Approve BOTCOIN');
-                            const stakeResp2 = await coordinator.getStakeCalldata(stakeAmountWei);
-                            if (stakeResp2.transaction) await this.submitTransaction(stakeResp2.transaction, 'Stake BOTCOIN');
-                            stakeOk = true;
-                            this.log('success', 'miner', 'Restaking confirmed ✔');
-                        } catch (restakeErr) {
-                            this.log('warn', 'miner', `Restake failed: ${restakeErr.message.slice(0, 100)}`);
+                            await this.ensureAuth();
+                            stakeOk = true; // Auth passed with existing stake!
+                            this.log('success', 'miner', '✔ Existing stake is sufficient — proceeding to mine!');
+                        } catch (authRetryErr) {
+                            const authMsg = authRetryErr.message || '';
+                            if (authMsg.includes('Insufficient') || authRetryErr.status === 403) {
+                                this.log('error', 'miner', '⚠ Existing stake is below minimum for selected tier.');
+                                this.log('error', 'miner', '⚠ Unstaking requires a 24h cooldown — cannot auto-unstake.');
+                                this.log('error', 'miner', `To change tier: manually unstake → wait 24h → withdraw → restake.`);
+                                this.log('error', 'miner', `Wallet: ${this.walletAddress}`);
+                                this.setState(STATES.ERROR); this.isRunning = false; return;
+                            } else {
+                                this.log('error', 'miner', `Auth failed: ${authMsg.slice(0, 120)}`);
+                                this.setState(STATES.ERROR); this.isRunning = false; return;
+                            }
                         }
                     } else {
                         this.log('warn', 'miner', `Staking failed: ${msg.slice(0, 100)} — may need BOTCOIN`);
                     }
                 }
 
-                // 3b: If staking failed, we need to buy BOTCOIN first
-                if (!stakeOk && config.autoFund !== false) {
+                // 3b: If staking failed and NOT already staked, we need to buy BOTCOIN first
+                if (!stakeOk && !alreadyStaked && config.autoFund !== false) {
                     this.setState(STATES.FUNDING);
                     this.log('info', 'miner', 'Need BOTCOIN — checking price and balance...');
 
@@ -617,7 +627,7 @@ class MinerSession {
                         this.log('error', 'miner', `Staking failed after purchase: ${e.message.slice(0, 120)}`);
                         this.setState(STATES.ERROR); this.isRunning = false; return;
                     }
-                } else if (!stakeOk && config.autoFund === false) {
+                } else if (!stakeOk && !alreadyStaked && config.autoFund === false) {
                     this.log('error', 'miner', `⚠ Need ${requiredTokens.toLocaleString()} BOTCOIN staked. Enable auto-fund or buy BOTCOIN manually.`);
                     this.log('error', 'miner', `Wallet: ${this.walletAddress}`);
                     this.setState(STATES.ERROR); this.isRunning = false; return;
