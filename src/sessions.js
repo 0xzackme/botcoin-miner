@@ -810,10 +810,11 @@ class MinerSession {
         this.broadcast({ type: 'pipeline', stage: 1, detail: 'Answering questions' });
         this.log('info', 'solver', '📋 Stage 1/3: Answer questions...');
         const ap = prompts.answerPrompt(challenge.doc, challenge.companies, challenge.questions);
-        const { content: answerRaw } = await this.callLLM(ap, this._primaryModel, { json: true, maxTokens: 4096 });
+        const { content: answerRaw } = await this.callLLM(ap, this._primaryModel, { json: true, maxTokens: 8192 });
+        this.log('debug', 'solver', `Raw response (${answerRaw.length} chars): ${answerRaw.slice(0, 300)}`);
         const answered = this._parseJSON(answerRaw);
         if (!answered?.answers?.length) {
-            this.log('error', 'solver', 'Stage 1 failed: no answers');
+            this.log('error', 'solver', `Stage 1 failed: no answers. Response start: ${answerRaw.slice(0, 200)}`);
             return '';
         }
         for (const a of answered.answers) {
