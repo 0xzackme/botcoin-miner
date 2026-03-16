@@ -514,11 +514,26 @@ class MinerSession {
                 let alreadyStaked = false;
                 let lastStakeError = '';
 
+                // Approve once (idempotent — safe to repeat if needed)
+                try {
+                    const approveResp = await coordinator.getStakeApproveCalldata(stakeAmountWei);
+                    if (approveResp.transaction) {
+                        await this.submitTransaction(approveResp.transaction, 'Approve BOTCOIN');
+                        await this._sleep(3000); // Let Bankr clear in-flight tx before stake
+                    }
+                } catch (approveErr) {
+                    this.log('warn', 'miner', `Approve failed: ${approveErr.message?.slice(0, 120)}`);
+                }
+
+                // Retry stake tx up to 3 times (with delay for in-flight tx limits)
                 for (let attempt = 1; attempt <= 3 && !stakeOk && !alreadyStaked; attempt++) {
                     if (this.shouldStop) return this._cleanup('User stopped');
+                    if (attempt > 1) {
+                        const delay = attempt * 10000; // 10s, 20s
+                        this.log('info', 'miner', `Waiting ${delay / 1000}s before retry...`);
+                        await this._sleep(delay);
+                    }
                     try {
-                        const approveResp = await coordinator.getStakeApproveCalldata(stakeAmountWei);
-                        if (approveResp.transaction) await this.submitTransaction(approveResp.transaction, 'Approve BOTCOIN');
                         const stakeResp = await coordinator.getStakeCalldata(stakeAmountWei);
                         if (stakeResp.transaction) await this.submitTransaction(stakeResp.transaction, 'Stake BOTCOIN');
                         stakeOk = true;
@@ -549,8 +564,6 @@ class MinerSession {
                             }
                         } else if (attempt < 3) {
                             this.log('warn', 'miner', `Stake attempt ${attempt}/3 failed: ${lastStakeError.slice(0, 120)}`);
-                            this.log('info', 'miner', `Retrying in ${attempt * 5}s...`);
-                            await this._sleep(5000 * attempt);
                         } else {
                             this.log('warn', 'miner', `Staking failed after 3 attempts: ${lastStakeError.slice(0, 150)}`);
                         }
