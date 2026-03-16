@@ -157,7 +157,7 @@ async function stageExtract(challenge) {
         return { answers: questions.map((_, i) => ({ question: i + 1, answer: 'unknown' })), raw: content };
     }
 
-    log.success('solver', `Stage 1 complete: ${parsed.answers.length} answers extracted`);
+    log.success('solver', `Stage 1: ${parsed.answers.length} answers`);
     return parsed;
 }
 
@@ -179,18 +179,30 @@ async function stageVerify(challenge, extractedData) {
         return extractedData;
     }
 
-    // Merge: use verified answers, log any corrections
+    // Merge: use verified answers, apply corrections
     let corrections = 0;
     for (const verified of parsed.answers) {
         const original = extractedData.answers.find(a => a.question === verified.question);
         if (original && verified.answer !== original.answer) {
             log.info('solver', `Corrected Q${verified.question}: "${original.answer}" → "${verified.answer}"`);
             original.answer = verified.answer;
+            original.initials = verified.initials || original.initials;
             corrections++;
         }
     }
 
-    log.success('solver', `Stage 2 complete: ${corrections} correction(s) applied`);
+    // Apply company data corrections if any
+    if (parsed.company_corrections) {
+        for (const fix of parsed.company_corrections) {
+            const company = extractedData.companies?.find(c => c.name === fix.name);
+            if (company && fix.field && fix.new_value) {
+                company[fix.field] = fix.new_value;
+                log.info('solver', `Fixed ${fix.name}.${fix.field}: "${fix.old_value}" → "${fix.new_value}"`);
+            }
+        }
+    }
+
+    log.success('solver', `Stage 2: ${corrections} correction(s)`);
     return extractedData;
 }
 
@@ -212,17 +224,48 @@ async function stageParseConstraints(challenge) {
     }
 
     const types = parsed.parsed.map(p => p.type);
-    log.success('solver', `Stage 3 complete: ${parsed.parsed.length} constraints parsed [${types.join(', ')}]`);
+    log.success('solver', `Stage 3: ${parsed.parsed.length} constraints parsed`);
     return parsed.parsed;
+}
+
+// ─── Stage 3.5: Compute Values ─────────────────────────
+
+async function stageCompute(challenge, verifiedData, parsedConstraints) {
+    setStage(3.5, 'Computing constraint values');
+    log.info('solver', '🔢 Stage 3.5: Computing constraint values...');
+
+    const { constraints } = challenge;
+    const prompt = prompts.computationPrompt(
+        verifiedData.answers, verifiedData.companies || [],
+        constraints, parsedConstraints
+    );
+
+    const { content } = await callLLM(prompt, primaryModel, { json: true, maxTokens: 8192 });
+    const parsed = parseJSON(content);
+
+    if (!parsed || !parsed.computations) {
+        log.warn('solver', 'Stage 3.5: Computation parse failed, proceeding without pre-computed values');
+        return null;
+    }
+
+    log.success('solver', `Stage 3.5: ${parsed.computations.length} values computed`);
+    if (parsed.must_include_values?.length) {
+        log.info('solver', `Must include: ${parsed.must_include_values.join(' | ')}`);
+    }
+    if (parsed.acrostic_letters) {
+        log.info('solver', `Acrostic: ${parsed.acrostic_letters}`);
+    }
+    return parsed;
 }
 
 // ─── Stage 4: Build Artifact ────────────────────────────
 
-async function stageBuildArtifact(challenge, verifiedData, parsedConstraints) {
+async function stageBuildArtifact(challenge, verifiedData, parsedConstraints, computedValues) {
     setStage(4, 'Building artifact');
     log.info('solver', '🔨 Stage 4/4: Building artifact...');
 
     const { questions, constraints, solveInstructions, proposal } = challenge;
+    const companyData = verifiedData.companies || [];
 
     let lastArtifact = null;
     let lastErrors = null;
@@ -231,7 +274,7 @@ async function stageBuildArtifact(challenge, verifiedData, parsedConstraints) {
         const prompt = prompts.artifactBuildPrompt(
             questions, verifiedData.answers, constraints,
             parsedConstraints, solveInstructions,
-            lastArtifact, lastErrors, proposal
+            lastArtifact, lastErrors, proposal, companyData, computedValues
         );
 
         const { content } = await callLLM(prompt, primaryModel, { temperature: 0.15 });
@@ -283,14 +326,17 @@ async function solve(challenge) {
         // Stage 1: Extract + Answer
         const extracted = await stageExtract(challenge);
 
-        // Stage 2: Verify
+        // Stage 2: Verify (with second model if configured)
         const verified = await stageVerify(challenge, extracted);
 
         // Stage 3: Parse Constraints
         const parsedConstraints = await stageParseConstraints(challenge);
 
+        // Stage 3.5: Pre-compute constraint values
+        const computedValues = await stageCompute(challenge, verified, parsedConstraints);
+
         // Stage 4: Build Artifact
-        const artifact = await stageBuildArtifact(challenge, verified, parsedConstraints);
+        const artifact = await stageBuildArtifact(challenge, verified, parsedConstraints, computedValues);
 
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
         log.success('solver', `━━━ Pipeline complete in ${elapsed}s ━━━`);
