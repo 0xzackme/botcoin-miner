@@ -810,7 +810,7 @@ class MinerSession {
         this.broadcast({ type: 'pipeline', stage: 1, detail: 'Answering questions' });
         this.log('info', 'solver', '📋 Stage 1/3: Answer questions...');
         const ap = prompts.answerPrompt(challenge.doc, challenge.companies, challenge.questions);
-        const { content: answerRaw } = await this.callLLM(ap, this._primaryModel, { json: true, maxTokens: 8192 });
+        const { content: answerRaw } = await this.callLLM(ap, this._primaryModel, { json: true, maxTokens: 16384 });
         this.log('debug', 'solver', `Raw response (${answerRaw.length} chars): ${answerRaw.slice(0, 300)}`);
         const answered = this._parseJSON(answerRaw);
         if (!answered?.answers?.length) {
@@ -829,7 +829,7 @@ class MinerSession {
         this.broadcast({ type: 'pipeline', stage: 2, detail: 'Computing constraints' });
         this.log('info', 'solver', '🔢 Stage 2/3: Compute constraint values...');
         const cp = prompts.computePrompt(challenge.doc, answered.answers, challenge.constraints);
-        const { content: computeRaw } = await this.callLLM(cp, this._primaryModel, { json: true, maxTokens: 4096 });
+        const { content: computeRaw } = await this.callLLM(cp, this._primaryModel, { json: true, maxTokens: 16384 });
         const cc = this._parseJSON(computeRaw) || {};
 
         // Log computed values
