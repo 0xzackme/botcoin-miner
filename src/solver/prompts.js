@@ -1,121 +1,122 @@
 // ─── Prompt Templates ───────────────────────────────────
-// Simplified 2-stage solver: SOLVE (answers+compute) → BUILD (artifact)
+// 3-stage solver: ANSWER → COMPUTE → BUILD
 
 function getInitials(name) {
     if (!name) return '?';
     return name.split(/\s+/).map(w => w[0] || '').join('').toUpperCase();
 }
 
-// ─── Stage 1: SOLVE — answers + compute everything in one call ───
-function solvePrompt(doc, companies, questions, constraints) {
-    return `You are solving a mining challenge. Read the document, answer questions, then compute constraint values.
+// ─── Stage 1: ANSWER — focused only on getting the right answers ───
+function answerPrompt(doc, companies, questions) {
+    return `Read the document and answer each question. Your answer MUST be an exact company name from the official list.
 
-## STEP 1: ANSWER QUESTIONS
+RULES:
+- Companies use multiple aliases. Always map back to the OFFICIAL name.
+- IGNORE hypothetical/speculative statements ("if", "would", "could", "might", "projected", "estimated").
+- For comparison questions (highest/lowest/most): find ALL candidates, list their values, compare, pick correct one.
+- Show step-by-step reasoning for each answer.
 
-Read the document and answer each question. Your answer MUST be an exact company name from the official list.
-
-CRITICAL RULES:
-- Companies use MULTIPLE names/aliases. Always map back to the OFFICIAL name from the list.
-- IGNORE hypothetical/speculative statements ("if", "would", "could", "might", "projected", "estimated", "potentially").
-- For comparison questions (highest/lowest): find ALL candidates, compare their values, pick the correct one.
-- Show your reasoning for each answer.
-
-## STEP 2: COMPUTE CONSTRAINT VALUES
-
-After answering, compute the EXACT value for each constraint by looking up data in the document.
-- "headquarters city of company from Question X" → find Q{X}'s answer company in the document → extract HQ city
-- "CEO's last name of company from Question X" → find CEO → extract last name only
-- "nextPrime((employees of QX mod 100) + 11)" → find employee count → compute: (employees % 100) + 11 → find next prime ≥ that
-- "equation A+B=C" → compute A, B from revenue data, C = A + B
-- Acrostic from initials → get initials of each referenced answer → concatenate → take first N letters → UPPERCASE
-- Revenue "mod 90": use revenue in MILLIONS (e.g. "$4.2B" = 4200, so 4200 mod 90 = 60)
-
-PRIMES: 11,13,17,19,23,29,31,37,41,43,47,53,59,61,67,71,73,79,83,89,97,101,103,107,109,113
-
-───── DOCUMENT ─────
-${doc}
-
-───── OFFICIAL COMPANY NAMES ─────
+OFFICIAL COMPANY NAMES:
 ${companies.join(', ')}
 
-───── QUESTIONS ─────
+DOCUMENT:
+${doc}
+
+QUESTIONS:
 ${questions.map((q, i) => `Q${i + 1}: ${q}`).join('\n')}
 
-───── CONSTRAINTS ─────
-${constraints.map((c, i) => `C${i + 1}: ${c}`).join('\n')}
-
-## RESPONSE FORMAT (JSON)
+Respond in JSON:
 {
   "answers": [
-    { "question": 1, "answer": "ExactOfficialCompanyName", "initials": "EOCN", "reasoning": "..." }
-  ],
-  "computed_constraints": {
-    "word_count": 19,
-    "forbidden_letter": "x",
-    "acrostic_letters": "ABCDEFGH",
-    "must_include": ["CityName", "LastName", "Country", "47", "42+38=80"],
-    "details": [
-      { "constraint": 2, "value": "CityName", "work": "Q8=CompanyX. Doc says CompanyX HQ is in CityName." },
-      { "constraint": 5, "value": "47", "work": "employees=8350. 8350%100=50. 50+11=61. nextPrime(61)=61." }
-    ]
-  }
+    { "question": 1, "answer": "ExactOfficialCompanyName", "initials": "EOCN", "reasoning": "step-by-step explanation" }
+  ]
+}`;
 }
 
-SHOW ALL WORK in the reasoning and details fields.`;
-}
+// ─── Stage 2: COMPUTE — look up company data + calculate constraint values ───
+function computePrompt(doc, answers, constraints) {
+    return `You have answers to questions about companies. Now compute the EXACT values required by each constraint.
 
-// ─── Stage 2: BUILD — assemble artifact from pre-computed values ───
-function buildPrompt(answers, computedConstraints, constraints, previousAttempt, validationErrors, solveInstructions, proposal) {
-    let prompt = `Build a SINGLE LINE artifact satisfying ALL constraints.
+ANSWERS:
+${answers.map((a, i) => `Q${i + 1}: ${a.answer} (initials: ${a.initials || getInitials(a.answer)})`).join('\n')}
 
-## PRE-COMPUTED VALUES (use these EXACTLY)
-Word count: ${computedConstraints?.word_count || '?'}
-Acrostic letters: ${computedConstraints?.acrostic_letters || '?'}
-Forbidden letter: ${computedConstraints?.forbidden_letter || 'none'}
-Must include: ${(computedConstraints?.must_include || []).join(' | ')}
+DOCUMENT (search this for company data — HQ, CEO, employees, revenue):
+${doc}
 
-## ANSWERS
-${answers.map((a, i) => `Q${i + 1}: ${a.answer} (${a.initials || getInitials(a.answer)})`).join('\n')}
-
-## CONSTRAINTS
+CONSTRAINTS TO RESOLVE:
 ${constraints.map((c, i) => `C${i + 1}: ${c}`).join('\n')}
 
-## DETAILED COMPUTATIONS
-${(computedConstraints?.details || []).map(d => `C${d.constraint}: "${d.value}" — ${d.work}`).join('\n')}
-`;
+FOR EACH CONSTRAINT, DO THIS:
+1. "word count = N" → value = N
+2. "headquarters city of company from Question X" → find QX's answer → search document for that company → extract HQ city name
+3. "CEO's last name of company from Question X" → find QX's answer → search document for CEO → extract LAST NAME only
+4. "headquarters country of company from Question X" → find QX's answer → search document → extract country
+5. "nextPrime((employees of QX mod 100) + 11)" → find employee count in doc → (employees % 100) + 11 → next prime ≥ result
+6. "equation A+B=C" → look up revenue in doc → compute A, B (revenue mod 90 + 10) → C = A + B → format as "A+B=C"
+7. Acrostic from initials → concatenate initials of referenced answers → take first N letters → UPPERCASE
+8. "forbidden letter" → extract the letter
+PRIMES: 11,13,17,19,23,29,31,37,41,43,47,53,59,61,67,71,73,79,83,89,97,101,103,107,109,113
 
-    if (solveInstructions) {
-        prompt += `\n## SOLVE INSTRUCTIONS\n${solveInstructions}\n`;
-    }
+REVENUE PARSING: "$4.2 billion" = 4200 (in millions). "mod 90" means 4200 % 90.
 
-    if (previousAttempt && validationErrors) {
-        prompt += `\n## ⚠ PREVIOUS ATTEMPT FAILED
-Previous: "${previousAttempt}"
-Errors:
-${validationErrors.map(e => `✖ ${e}`).join('\n')}
-Fix ALL errors while keeping other constraints.\n`;
+Respond in JSON:
+{
+  "word_count": 19,
+  "forbidden_letter": "x",
+  "acrostic_letters": "ABCDEFGH",
+  "must_include": ["CityName", "LastName", "Country", "47", "42+38=80"],
+  "details": [
+    { "constraint": 2, "value": "CityName", "work": "Q8=CompanyX. Doc says HQ in CityName." },
+    { "constraint": 5, "value": "47", "work": "employees=8350. 8350%100=50. 50+11=61. nextPrime(61)=61." }
+  ]
+}
+
+CRITICAL: Every value must come from the document. Show your work. Do NOT guess.`;
+}
+
+// ─── Stage 3: BUILD — assemble artifact from pre-computed values ───
+function buildPrompt(answers, computed, constraints, previousAttempt, errors, solveInstructions, proposal) {
+    let prompt = `Build a SINGLE LINE artifact satisfying ALL constraints below.
+
+PRE-COMPUTED VALUES (use these EXACTLY):
+- Word count: ${computed?.word_count || '?'}
+- Forbidden letter: "${computed?.forbidden_letter || 'none'}"
+- Acrostic letters: ${computed?.acrostic_letters || '?'}
+- Must include these exact strings: ${(computed?.must_include || []).join(', ')}
+
+ANSWERS:
+${answers.map((a, i) => `Q${i + 1}: ${a.answer} (${a.initials || getInitials(a.answer)})`).join('\n')}
+
+CONSTRAINTS:
+${constraints.map((c, i) => `C${i + 1}: ${c}`).join('\n')}
+
+COMPUTATIONS:
+${(computed?.details || []).map(d => `C${d.constraint}: "${d.value}" (${d.work})`).join('\n')}`;
+
+    if (solveInstructions) prompt += `\n\nSOLVE INSTRUCTIONS:\n${solveInstructions}`;
+
+    if (previousAttempt && errors) {
+        prompt += `\n\nPREVIOUS ATTEMPT FAILED:
+"${previousAttempt}"
+Errors: ${errors.join('; ')}
+Fix ALL errors.`;
     }
 
     if (proposal) {
-        prompt += `\n─── PROPOSAL ───\n${JSON.stringify(proposal)}\nAfter the artifact, append on new lines:\nVOTE: yes|no\nREASONING: <100 words max>\n`;
+        prompt += `\n\nPROPOSAL:\n${JSON.stringify(proposal)}\nAfter artifact, add:\nVOTE: yes|no\nREASONING: <100 words`;
     }
 
     prompt += `
-## BUILD STRATEGY
-1. Start with acrostic letters — each word MUST begin with the required letter
-2. Embed must_include values as words in the artifact
-3. AVOID the forbidden letter in EVERY character
-4. Count words to hit exact word_count
-5. Verify: count words, check first letters, confirm all must_include present, no forbidden letter
 
-## OUTPUT
-Your response must be exactly one line — the artifact string and nothing else. No reasoning, no preamble, no JSON. Just the artifact.`;
+BUILD STEPS:
+1. Start with acrostic — word N must begin with letter N of the acrostic
+2. Include all must_include values as words
+3. AVOID forbidden letter in EVERY character
+4. Hit exact word count
+5. Double-check: count words, verify first letters, confirm must_include present, no forbidden letter
 
+OUTPUT: Exactly one line — the artifact string only. No quotes, no explanation.`;
     return prompt;
 }
 
-module.exports = {
-    solvePrompt,
-    buildPrompt,
-    getInitials
-};
+module.exports = { answerPrompt, computePrompt, buildPrompt, getInitials };

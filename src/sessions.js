@@ -806,23 +806,30 @@ class MinerSession {
         const prompts = require('./solver/prompts');
         const validator = require('./solver/validator');
 
-        // ── Stage 1: SOLVE — answers + compute in one reasoning chain ──
-        this.broadcast({ type: 'pipeline', stage: 1, detail: 'Solving challenge' });
-        this.log('info', 'solver', '🧠 Stage 1/2: Solve (answers + compute)...');
-        const solvePromptText = prompts.solvePrompt(
-            challenge.doc, challenge.companies, challenge.questions, challenge.constraints
-        );
-        this.log('info', 'solver', `Prompt: ${solvePromptText.length} chars`);
-        const { content: solveRaw } = await this.callLLM(solvePromptText, this._primaryModel, { json: true, maxTokens: 8192 });
-        const solved = this._parseJSON(solveRaw);
-
-        if (!solved || !solved.answers) {
-            this.log('error', 'solver', 'Stage 1 failed: no answers returned');
+        // ── Stage 1: ANSWER — focused on getting right answers ──
+        this.broadcast({ type: 'pipeline', stage: 1, detail: 'Answering questions' });
+        this.log('info', 'solver', '📋 Stage 1/3: Answer questions...');
+        const ap = prompts.answerPrompt(challenge.doc, challenge.companies, challenge.questions);
+        const { content: answerRaw } = await this.callLLM(ap, this._primaryModel, { json: true, maxTokens: 4096 });
+        const answered = this._parseJSON(answerRaw);
+        if (!answered?.answers?.length) {
+            this.log('error', 'solver', 'Stage 1 failed: no answers');
             return '';
         }
+        for (const a of answered.answers) {
+            if (!a.initials) a.initials = prompts.getInitials(a.answer);
+        }
+        this.log('success', 'solver', `Stage 1: ${answered.answers.length} answers`);
+        for (const a of answered.answers) {
+            this.log('info', 'solver', `  Q${a.question}: ${a.answer} (${a.initials})`);
+        }
 
-        const cc = solved.computed_constraints || {};
-        this.log('success', 'solver', `Stage 1: ${solved.answers.length} answers`);
+        // ── Stage 2: COMPUTE — look up data + calculate constraint values ──
+        this.broadcast({ type: 'pipeline', stage: 2, detail: 'Computing constraints' });
+        this.log('info', 'solver', '🔢 Stage 2/3: Compute constraint values...');
+        const cp = prompts.computePrompt(challenge.doc, answered.answers, challenge.constraints);
+        const { content: computeRaw } = await this.callLLM(cp, this._primaryModel, { json: true, maxTokens: 4096 });
+        const cc = this._parseJSON(computeRaw) || {};
 
         // Log computed values
         if (cc.word_count) this.log('info', 'solver', `Word count: ${cc.word_count}`);
@@ -831,36 +838,34 @@ class MinerSession {
         if (cc.must_include?.length) this.log('info', 'solver', `Must include: ${cc.must_include.join(' | ')}`);
         if (cc.details?.length) {
             for (const d of cc.details) {
-                this.log('info', 'solver', `C${d.constraint}: "${d.value}" — ${d.work?.slice(0, 80)}`);
+                this.log('info', 'solver', `  C${d.constraint}: "${d.value}"`);
             }
         }
+        this.log('success', 'solver', `Stage 2: computed`);
 
-        // Build parsed constraints for local validator (only what we can check)
+        // Build parsed constraints for local validator
         const parsedConstraints = [];
         if (cc.word_count) parsedConstraints.push({ index: 'wc', type: 'word_count', value: parseInt(cc.word_count) });
         if (cc.forbidden_letter) parsedConstraints.push({ index: 'fl', type: 'forbidden_letter', value: cc.forbidden_letter });
         if (cc.acrostic_letters) parsedConstraints.push({ index: 'ac', type: 'acrostic', value: cc.acrostic_letters });
         if (cc.must_include?.length) {
-            for (let i = 0; i < cc.must_include.length; i++) {
-                const v = cc.must_include[i];
-                if (v && v.trim()) parsedConstraints.push({ index: `mi${i}`, type: 'must_include', value: v });
+            for (const v of cc.must_include) {
+                if (v && v.trim()) parsedConstraints.push({ index: `mi`, type: 'must_include', value: v });
             }
         }
 
-        // ── Stage 2: BUILD — assemble artifact ──
-        this.broadcast({ type: 'pipeline', stage: 2, detail: 'Building artifact' });
-        this.log('info', 'solver', '🔨 Stage 2/2: Build artifact...');
+        // ── Stage 3: BUILD — assemble artifact ──
+        this.broadcast({ type: 'pipeline', stage: 3, detail: 'Building artifact' });
+        this.log('info', 'solver', '🔨 Stage 3/3: Build artifact...');
         let lastArtifact = null, lastErrors = null;
         for (let attempt = 1; attempt <= 3; attempt++) {
             const bp = prompts.buildPrompt(
-                solved.answers, cc, challenge.constraints,
+                answered.answers, cc, challenge.constraints,
                 lastArtifact, lastErrors,
                 challenge.solveInstructions, challenge.proposal
             );
             const { content } = await this.callLLM(bp, this._primaryModel, { temperature: 0.15 });
             let artifact = challenge.proposal ? content : (content.split('\n').filter(l => l.trim())[0] || content);
-
-            // Strip any quotes/preamble
             artifact = artifact.replace(/^["']|["']$/g, '').trim();
 
             if (parsedConstraints.length > 0) {
