@@ -8,29 +8,34 @@ function getInitials(name) {
 
 // ─── Stage 1: ANSWER — focused only on getting the right answers ───
 function answerPrompt(doc, companies, questions) {
-    return `Read the document and answer each question. Your answer MUST be an exact company name from the official list.
+    return `You are an expert at reading comprehension challenges. Read the document and answer each question precisely.
 
-RULES:
-- Companies use multiple aliases. Always map back to the OFFICIAL name.
-- IGNORE hypothetical/speculative statements ("if", "would", "could", "might", "projected", "estimated").
-- For comparison questions (highest/lowest/most): find ALL candidates, list their values, compare, pick correct one.
-- Show step-by-step reasoning for each answer.
+## CRITICAL RULES
+- Your answer MUST be an exact company name from the official list below
+- Companies use MULTIPLE aliases. Always map back to the OFFICIAL name.
+- IGNORE hypothetical/speculative statements ("if", "would", "could", "might", "projected", "estimated")
+- For comparison questions (highest/lowest/most): find ALL candidates, list values, compare, pick correct one
+- "initials" = first letter of each word, UPPERCASED (e.g. "Quantum Solutions" = "QS")
 
-OFFICIAL COMPANY NAMES:
-${companies.join(', ')}
-
-DOCUMENT:
+## DOCUMENT
 ${doc}
 
-QUESTIONS:
+## COMPANIES (official names — answers MUST match one of these exactly)
+${companies.join(', ')}
+
+## QUESTIONS
 ${questions.map((q, i) => `Q${i + 1}: ${q}`).join('\n')}
 
-Respond in JSON:
+## RESPONSE FORMAT (JSON)
+Think through each answer carefully, but output ONLY this compact JSON:
 {
   "answers": [
-    { "question": 1, "answer": "ExactOfficialCompanyName", "initials": "EOCN", "reasoning": "step-by-step explanation" }
+    { "question": 1, "answer": "CompanyName", "initials": "CN" },
+    { "question": 2, "answer": "CompanyName", "initials": "CN" }
   ]
-}`;
+}
+
+IMPORTANT: Return ALL ${questions.length} answers. Keep the JSON compact — no reasoning field, just question/answer/initials.`;
 }
 
 // ─── Stage 2: COMPUTE — look up company data + calculate constraint values ───
