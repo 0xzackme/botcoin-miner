@@ -263,6 +263,12 @@ class MinerSession {
 
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 300000);
+        // Link to session abort so Stop button cancels in-progress LLM calls
+        const onSessionAbort = () => controller.abort();
+        if (this.abortController?.signal) {
+            if (this.abortController.signal.aborted) { clearTimeout(timer); throw new Error('Stopped by user'); }
+            this.abortController.signal.addEventListener('abort', onSessionAbort, { once: true });
+        }
 
         let res;
         try {
@@ -274,10 +280,15 @@ class MinerSession {
             });
         } catch (e) {
             clearTimeout(timer);
-            if (e.name === 'AbortError') throw new RetryableError('LLM timeout after 300s', 0, 30000);
+            this.abortController?.signal?.removeEventListener('abort', onSessionAbort);
+            if (e.name === 'AbortError') {
+                if (this.shouldStop) throw new Error('Stopped by user');
+                throw new RetryableError('LLM timeout after 300s', 0, 30000);
+            }
             throw e;
         }
         clearTimeout(timer);
+        this.abortController?.signal?.removeEventListener('abort', onSessionAbort);
 
         if (!res.ok) {
             const text = await res.text();
