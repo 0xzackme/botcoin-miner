@@ -62,9 +62,9 @@ const AUTO_CLAIM_INTERVAL = 30 * 60 * 1000; // 30 minutes
 
 // Convert stake amount (wei) to whole BOTCOIN tokens
 const TIER_MAP = {
-    '25000000000000000000000000': { tokens: 25000000, label: 'Tier 1 (25M)' },
-    '50000000000000000000000000': { tokens: 50000000, label: 'Tier 2 (50M)' },
-    '100000000000000000000000000': { tokens: 100000000, label: 'Tier 3 (100M)' }
+    '25000100000000000000000000': { tokens: 25000100, label: 'Tier 1 (25M)' },
+    '50000100000000000000000000': { tokens: 50000100, label: 'Tier 2 (50M)' },
+    '100000100000000000000000000': { tokens: 100000100, label: 'Tier 3 (100M)' }
 };
 
 function getTierTokens(stakeAmountWei) {
