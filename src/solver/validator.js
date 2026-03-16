@@ -44,9 +44,10 @@ function validateConstraint(artifact, constraint) {
 
         case 'acrostic': {
             const expected = (constraint.value || '').toUpperCase();
+            if (!expected || expected === 'NULL') break; // Skip unresolved
             const actual = getAcrostic(artifact).toUpperCase();
-            if (expected && !actual.startsWith(expected)) {
-                errors.push(`Acrostic: expected "${expected}", got "${actual.slice(0, expected.length)}"`);
+            if (!actual.startsWith(expected)) {
+                errors.push(`Acrostic: expected "${expected}", got "${actual.slice(0, expected.length + 5)}"`);
             }
             break;
         }
@@ -61,8 +62,12 @@ function validateConstraint(artifact, constraint) {
         }
 
         case 'must_include': {
-            const phrase = constraint.value || '';
-            if (phrase && !artifact.toLowerCase().includes(phrase.toLowerCase())) {
+            const phrase = constraint.value;
+            if (!phrase || phrase === 'null' || phrase === '?') break; // Skip unresolved
+            // Skip if still a placeholder
+            const lower = phrase.toLowerCase();
+            if (lower.includes('computed_') || lower.includes('missing_data') || lower.includes('question')) break;
+            if (!artifact.toLowerCase().includes(lower)) {
                 errors.push(`Must include "${phrase}" — not found`);
             }
             break;

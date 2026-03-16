@@ -2,6 +2,11 @@
 // Advanced prompts for multi-stage BOTCOIN mining challenge solving.
 // Designed for high solve rates with complex constraint satisfaction.
 
+function getInitials(name) {
+    if (!name) return '?';
+    return name.split(/\s+/).map(w => w[0] || '').join('').toUpperCase();
+}
+
 // Stage 1: Extract ALL company data + answer questions
 function extractionPrompt(doc, companies, questions) {
     return `You are an expert data extraction agent for a complex challenge. You must be EXTREMELY precise.
@@ -120,107 +125,90 @@ Be AGGRESSIVE about corrections. It's better to fix a wrong answer than to leave
 
 // Stage 3: Parse constraints into structured format
 function constraintParsingPrompt(constraints) {
-    return `Parse these constraints into structured JSON for programmatic validation.
+    return `Parse these constraints into structured JSON. You can ONLY fill in values you can determine directly from the constraint text itself.
 
 ## CONSTRAINTS
 ${constraints.map((c, i) => `C${i + 1}: ${c}`).join('\n')}
 
-## CONSTRAINT TYPES
-- word_count: exact number of words required
-- acrostic: first letter of each word must spell something
-- forbidden_letter: a letter that must NOT appear anywhere
-- must_include: an exact phrase/value that must appear in the artifact
-- must_not_include: something that must NOT appear
-- starts_with: artifact must start with specific text
-- ends_with: artifact must end with specific text
-- prime: word count or some value must be prime
-- mod: modular arithmetic constraint
-- other: anything else
+## RULES
+- For word_count: extract the exact number → value = number
+- For forbidden_letter: extract the letter → value = "letter"  
+- For must_include where the exact literal text is given: value = "exact text"
+- For must_include that REFERENCES a question (e.g. "headquarters city of company from Q8"): value = null (needs computation)
+- For acrostic where exact letters are given: value = "LETTERS"
+- For acrostic that REFERENCES questions/initials: value = null (needs computation)
+- For any constraint requiring math or data lookup: value = null
 
 ## RESPONSE FORMAT (JSON)
 {
   "parsed": [
-    { "index": 1, "type": "word_count", "value": 19, "raw": "original constraint text" },
-    { "index": 2, "type": "must_include", "value": "specific text", "description": "what must be included and why" },
-    { "index": 3, "type": "acrostic", "value": "ABCDEFGH", "description": "first 8 letters of combined initials" },
-    { "index": 4, "type": "forbidden_letter", "value": "x" },
-    { "index": 5, "type": "must_include", "value": "computed_value", "computation": "description of math needed" }
+    { "index": 1, "type": "word_count", "value": 19 },
+    { "index": 2, "type": "must_include", "value": null, "needs_computation": true, "description": "headquarters city of Q8 answer" },
+    { "index": 3, "type": "must_include", "value": null, "needs_computation": true, "description": "CEO last name of Q3 answer" },
+    { "index": 4, "type": "must_include", "value": null, "needs_computation": true, "description": "HQ country of Q6 answer" },
+    { "index": 5, "type": "must_include", "value": null, "needs_computation": true, "description": "nextPrime math" },
+    { "index": 6, "type": "must_include", "value": null, "needs_computation": true, "description": "equation A+B=C" },
+    { "index": 7, "type": "acrostic", "value": null, "needs_computation": true, "description": "initials from answers" },
+    { "index": 8, "type": "forbidden_letter", "value": "x" }
   ]
 }
 
-IMPORTANT: For constraints that reference questions (e.g. "headquarters city of company from Question 8"), note which question is referenced so we can look up the data.`;
+Types: word_count, acrostic, forbidden_letter, must_include, must_not_include, starts_with, ends_with, prime, mod, other
+CRITICAL: Set value = null for ANY constraint that references question answers, company data, or requires mathematical computation. Do NOT put placeholder text or raw constraint text as the value.`;
 }
 
-// Stage 3.5: Pre-compute all constraint values
-function computationPrompt(answers, companyData, constraints, parsedConstraints) {
-    let prompt = `You are a COMPUTATION agent. Your job is to calculate the EXACT values needed for each constraint.
+// Stage 3.5: Pre-compute all constraint values (SELF-CONTAINED — reads document directly)
+function computationPrompt(doc, answers, constraints, parsedConstraints) {
+    return `You are a COMPUTATION agent. Read the document and compute EXACT values for each constraint.
 
-## ANSWERS (company names from questions)
-${answers.map((a, i) => `Q${i + 1}: ${a.answer} (initials: ${a.initials || '?'})`).join('\n')}
+## YOUR ANSWERS (company names that answered each question)
+${answers.map((a, i) => `Q${i + 1}: ${a.answer} (initials: ${a.initials || getInitials(a.answer)})`).join('\n')}
 
-## COMPANY DATA
-`;
-    for (const c of (companyData || [])) {
-        prompt += `${c.name}: HQ_City="${c.headquarters_city || '?'}" | HQ_Country="${c.headquarters_country || '?'}" | CEO="${c.ceo_name || '?'}" (last name: "${c.ceo_last_name || '?'}") | Employees=${c.employees || '?'} | Revenue=${c.revenue || '?'} (numeric: ${c.revenue_numeric || '?'})\n`;
-    }
+## DOCUMENT (search this for company details)
+${doc}
 
-    prompt += `
-## CONSTRAINTS
+## CONSTRAINTS TO RESOLVE
 ${constraints.map((c, i) => `C${i + 1}: ${c}`).join('\n')}
 
-## PARSED CONSTRAINTS
-${JSON.stringify(parsedConstraints, null, 2)}
+## STEP-BY-STEP INSTRUCTIONS
 
-## YOUR TASK
-For EACH constraint, compute the EXACT value that must appear in the artifact. Show your work step by step.
+For EACH constraint, you must:
 
-Example computations:
-- "headquarters city of company from Question 8" → Look up Q8 answer company → find its HQ city → that city name must appear
-- "CEO's last name of company from Question 3" → Look up Q3 answer company → find CEO → extract last name
-- "nextPrime((employees of Q8 answer mod 100) + 11)" → Get employee count → compute mod 100 → add 11 → find next prime ≥ result
-- "equation A+B=C where A=((Q1 revenue mod 90)+10)" → Get Q1 answer's revenue → mod 90 → add 10 → that's A. Similarly compute B. C=A+B.
-- "FIRST 8 LETTERS OF (INITIALS(Q8)+INITIALS(Q3)+INITIALS(Q6)+INITIALS(Q7))" → Get initials of each answer → concatenate → take first 8 → UPPERCASE
+1. **Word count** → Just note the required count
+2. **"headquarters city of company from Question X"** → Find Q{X}'s answer company name above → search the document for that company → find where it says their HQ/headquarters → extract the CITY name
+3. **"CEO's last name of company from Question X"** → Find Q{X}'s answer → search document for that company's CEO → extract LAST NAME only
+4. **"headquarters country of company from Question X"** → Same lookup → extract COUNTRY name
+5. **"nextPrime((employees of QX answer mod 100) + 11)"** → Find Q{X}'s answer company → search doc for employee count → compute: (employees % 100) + 11 → find next prime ≥ that number
+6. **"equation A+B=C where A=((Q1 revenue of QX answer mod 90)+10), B=..."** → Look up each company's revenue in the document → extract the numeric value → compute A, B, C
+7. **"FIRST 8 LETTERS OF (INITIALS(Q8)+INITIALS(Q3)+...)"** → Get initials of each answer company → concatenate → take first 8 → UPPERCASE
+8. **Forbidden letter** → Note which letter is forbidden
+9. **Acrostic** → Compute the required first letters
 
-## PRIME NUMBER REFERENCE
-Primes near common ranges: 2,3,5,7,11,13,17,19,23,29,31,37,41,43,47,53,59,61,67,71,73,79,83,89,97,101,103,107,109,113
+## PRIME NUMBERS FOR REFERENCE
+11,13,17,19,23,29,31,37,41,43,47,53,59,61,67,71,73,79,83,89,97,101,103,107,109,113
+
+## CRITICAL: Revenue parsing
+- "$4.2 billion" = 4200000000 (4.2 × 10^9)
+- "$850 million" = 850000000
+- When doing "revenue mod 90", use the value in MILLIONS (e.g. 4200 for $4.2B)
 
 ## RESPONSE FORMAT (JSON)
 {
   "computations": [
-    {
-      "constraint_index": 1,
-      "type": "word_count",
-      "required_value": 19,
-      "work": "Constraint says exactly 19 words"
-    },
-    {
-      "constraint_index": 2,
-      "type": "must_include",
-      "required_value": "Tokyo",
-      "work": "Q8 answer is CompanyX. CompanyX HQ city is Tokyo."
-    },
-    {
-      "constraint_index": 5,
-      "type": "prime_number",
-      "required_value": "47",
-      "work": "Q8 answer CompanyX has 8350 employees. 8350 mod 100 = 50. 50 + 11 = 61. nextPrime(61) = 61. Include '61'."
-    },
-    {
-      "constraint_index": 7,
-      "type": "acrostic",
-      "required_value": "ABCDEFGH",
-      "work": "Q8=CompanyX (initials CX), Q3=CompanyY (CY), Q6=CompanyZ (CZ), Q7=CompanyW (CW). Combined: CXCYCZCW. First 8: CXCYCZCW."
-    }
+    { "constraint_index": 1, "type": "word_count", "required_value": "19", "work": "Constraint says 19 words" },
+    { "constraint_index": 2, "type": "must_include", "required_value": "Tokyo", "work": "Q8=CompanyX. Document says CompanyX HQ is in Tokyo." },
+    { "constraint_index": 3, "type": "must_include", "required_value": "Smith", "work": "Q3=CompanyY. Document says CEO is John Smith. Last name: Smith" },
+    { "constraint_index": 5, "type": "must_include", "required_value": "47", "work": "Q8=CompanyX, employees=8350. 8350%100=50. 50+11=61. nextPrime(61)=61. Answer: 61" },
+    { "constraint_index": 6, "type": "must_include", "required_value": "42+38=80", "work": "A=((4200%90)+10)=(60+10)=70. B=..." },
+    { "constraint_index": 7, "type": "acrostic", "required_value": "ABCDEFGH", "work": "Q8=CX(initials CX), Q3=CY... Combined: CXCY... First 8: ABCDEFGH" }
   ],
-  "forbidden_letters": ["x"],
   "target_word_count": 19,
   "acrostic_letters": "ABCDEFGH",
+  "forbidden_letters": ["x"],
   "must_include_values": ["Tokyo", "Smith", "Japan", "47", "42+38=80"]
 }
 
-SHOW ALL WORK. Double-check every computation. These values MUST be mathematically correct.`;
-
-    return prompt;
+SHOW ALL WORK. Every value must be computed from the document. Do NOT guess or use MISSING_DATA.`;
 }
 
 // Stage 4: Build artifact using pre-computed values

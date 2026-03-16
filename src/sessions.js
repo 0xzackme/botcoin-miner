@@ -828,23 +828,33 @@ class MinerSession {
                 let corrections = 0;
                 for (const v of verified.answers) {
                     const orig = extracted.answers.find(a => a.question === v.question);
-                    if (orig && v.answer !== orig.answer) {
-                        orig.answer = v.answer;
-                        orig.initials = v.initials || orig.initials;
-                        corrections++;
-                    }
+                    if (orig && v.answer !== orig.answer) corrections++;
                 }
-                // Apply company data corrections
-                if (verified.company_corrections) {
-                    for (const fix of verified.company_corrections) {
-                        const company = extracted.companies?.find(c => c.name === fix.name);
-                        if (company && fix.field && fix.new_value) {
-                            company[fix.field] = fix.new_value;
-                            this.log('info', 'solver', `Fixed ${fix.name}.${fix.field}: "${fix.old_value}" → "${fix.new_value}"`);
+                // Safeguard: if verify corrects >50% of answers, it's probably wrong — skip
+                const total = extracted.answers.length;
+                if (corrections > total * 0.5) {
+                    this.log('warn', 'solver', `Stage 2: ${corrections}/${total} corrections (>50%) — too many, keeping original answers`);
+                } else {
+                    // Apply corrections
+                    for (const v of verified.answers) {
+                        const orig = extracted.answers.find(a => a.question === v.question);
+                        if (orig && v.answer !== orig.answer) {
+                            this.log('info', 'solver', `Corrected Q${v.question}: "${orig.answer}" → "${v.answer}"`);
+                            orig.answer = v.answer;
+                            orig.initials = v.initials || orig.initials;
                         }
                     }
+                    // Apply company data corrections
+                    if (verified.company_corrections) {
+                        for (const fix of verified.company_corrections) {
+                            const company = extracted.companies?.find(c => c.name === fix.name);
+                            if (company && fix.field && fix.new_value) {
+                                company[fix.field] = fix.new_value;
+                            }
+                        }
+                    }
+                    this.log('success', 'solver', `Stage 2: ${corrections} correction(s) applied`);
                 }
-                this.log('success', 'solver', `Stage 2: ${corrections} correction(s)`);
             }
         } else {
             this.log('info', 'solver', '⏩ Stage 2: Skipped (dual-model verification disabled)');
@@ -863,7 +873,7 @@ class MinerSession {
         this.broadcast({ type: 'pipeline', stage: 3.5, detail: 'Computing constraint values' });
         this.log('info', 'solver', '🔢 Stage 3.5/5: Computing constraint values...');
         const computePrompt = prompts.computationPrompt(
-            extracted.answers, extracted.companies || [],
+            challenge.doc, extracted.answers,
             challenge.constraints, parsedConstraints
         );
         const { content: computeRaw } = await this.callLLM(computePrompt, this._primaryModel, { json: true, maxTokens: 8192 });
@@ -875,6 +885,44 @@ class MinerSession {
             }
             if (computedValues.acrostic_letters) {
                 this.log('info', 'solver', `Acrostic: ${computedValues.acrostic_letters}`);
+            }
+
+            // Merge computed values back into parsed constraints for validator
+            if (parsedConstraints && computedValues.computations) {
+                for (const comp of computedValues.computations) {
+                    // Robust index matching: handle string/number mismatch
+                    const ci = parseInt(comp.constraint_index);
+                    const pc = parsedConstraints.find(p => parseInt(p.index) === ci);
+                    const val = String(comp.required_value || '');
+                    // Skip bad values
+                    if (!val || val === '?' || val === 'null' || val === 'undefined' ||
+                        val.toLowerCase().includes('missing') || val.toLowerCase().includes('unknown')) {
+                        continue;
+                    }
+                    if (pc) {
+                        this.log('info', 'solver', `C${ci}: "${pc.value}" → "${val}"`);
+                        pc.value = val;
+                        pc.computed = true;
+                    }
+                }
+                // Update acrostic if computed
+                if (computedValues.acrostic_letters) {
+                    const acrosticPC = parsedConstraints.find(p => p.type === 'acrostic');
+                    if (acrosticPC) {
+                        acrosticPC.value = computedValues.acrostic_letters;
+                        acrosticPC.computed = true;
+                    }
+                }
+                // Update word count if computed
+                if (computedValues.target_word_count) {
+                    const wcPC = parsedConstraints.find(p => p.type === 'word_count');
+                    if (wcPC) wcPC.value = parseInt(computedValues.target_word_count);
+                }
+                // Update forbidden letters
+                if (computedValues.forbidden_letters?.length) {
+                    const flPC = parsedConstraints.find(p => p.type === 'forbidden_letter');
+                    if (flPC && !flPC.value) flPC.value = computedValues.forbidden_letters[0];
+                }
             }
         } else {
             this.log('warn', 'solver', 'Stage 3.5: Computation failed, proceeding without pre-computed values');
